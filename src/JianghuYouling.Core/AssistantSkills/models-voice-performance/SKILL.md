@@ -1,0 +1,18 @@
+---
+name: models-voice-performance
+description: 模型配置、思量显示、语音与速度诊断
+triggers: 模型,接口,Key,api,baseUrl,token,缓存,速度,越来越慢,加载,思考,思量,推理,Gemini,DeepSeek,语音,朗读,输入,千问,Qwen,流式,多模型
+---
+# 模型、思量、语音与性能
+
+接口地址、模型、Key、最大回复长度、流式输出、思量显示和语音都在设置页配置。默认最大输出上限是 32768 token，默认上下文窗口是 1000000 token；思量显示默认开启。小窗口本地模型或兼容接口请填写其真实上限。<!-- JHYL_ASSISTANT_KB_MAX_TOKENS_DEFAULT_32768 JHYL_ASSISTANT_KB_THINKING_DEFAULT_ON -->
+
+千问新开源 Qwen3.8 可通过本机 Ollama 使用：`baseUrl` 填 `http://127.0.0.1:11434`，模型填 `qwen3.8` 或 `qwen3.8:27b`，API Key 留空，上下文窗口填 `262144`。Mod 会自动改用 Ollama 原生聊天接口，并保留思考、流式输出与多轮工具上下文；不要在地址后手工补 `/v1` 或 `/api/chat`。<!-- JHYL_ASSISTANT_KB_LOCAL_OLLAMA_QWEN38 -->
+
+推理模型的 reasoning/think 内容只显示在思量区，不能混入正文。思量最常出现在【一轮回话的开场推理】；部分模型在强制行动轮不允许同时携带推理内容，所以后续轮不显示思量可能是正常协议行为。Gemini 的思考标签也必须被识别并从正文剥离。
+
+流式行动轮只显示思量和行动进度，不展示随后可能撤回的临时正文草稿。交换失败可结合本地日志中的工具明细、执行、请求和回执定位人物、物品、数量或后端落地问题。<!-- JHYL_ASSISTANT_KB_BARTER_STREAM_DIAG -->
+
+语音包括聊天框语音输入和 NPC 回复朗读；语音输入依赖本机系统识别，朗读可接兼容服务。千问/Qwen 语音服务按提供商和模型特征识别，不能仅按单一固定地址猜测。<!-- JHYL_ASSISTANT_KB_TTS_QWEN_PROVIDER_DETECTION -->
+
+多轮聊天变慢时，先分析真实日志中的排队、首字、重试、总耗时、输入/输出 token 与缓存读写。长期记忆搜索必须每轮发生，但记忆整理已移出回复关键路径；旧历史和可再召回动态块会在预算不足时优先裁剪，稳定世界书、人设、画像与契约优先保留。不要虚构固定提速百分比。

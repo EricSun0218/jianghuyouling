@@ -1,0 +1,97 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <AssemblyName>JianghuYouling.Frontend</AssemblyName>
+    <RootNamespace>JianghuYouling</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <Deterministic>true</Deterministic>
+    <DebugType>portable</DebugType>
+    <!-- 游戏前端 Managed 目录（引用游戏 DLL，全部 Private=false 不复制） -->
+    <Managed>$(TaiwuGameDir)\The Scroll of Taiwu_Data\Managed</Managed>
+    <!-- 编译后部署到游戏 Mod 目录(游戏测试用) -->
+    <ModDeploy>$(TaiwuGameDir)\Mod\JianghuYouling\Plugins</ModDeploy>
+    <!-- 工坊上传用的中文名目录;构建时若存在则一并同步(免手动复制、保 Config 版本与 DLL 一致) -->
+    <PublishDeploy>$(TaiwuWorkshopDir)</PublishDeploy>
+  </PropertyGroup>
+
+  <!-- net48 引用程序集从 NuGet 拉取，免装系统 targeting pack -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\Shared\RpcConst.cs" Link="Shared\RpcConst.cs" />
+    <EmbeddedResource Include="..\..\deploy\assistant-linger-default.png"
+                      Link="Assets\assistant-linger-default.png"
+                      LogicalName="JianghuYouling.Frontend.Assets.assistant-linger-default.png"
+                      Condition="Exists('..\..\deploy\assistant-linger-default.png')" />
+    <EmbeddedResource Include="..\..\deploy\workshop-detail-afdian-qr-cropped.png"
+                      Link="Assets\workshop-detail-afdian-qr-cropped.png"
+                      LogicalName="JianghuYouling.Frontend.Assets.workshop-detail-afdian-qr-cropped.png"
+                      Condition="Exists('..\..\deploy\workshop-detail-afdian-qr-cropped.png')" />
+    <!-- 只部署当前版本正在使用的封面与详情图，避免把历史封面一起打进 Mod/工坊。 -->
+    <WorkshopAsset Include="..\..\LICENSE;
+                            ..\..\NOTICE;
+                            ..\..\THIRD_PARTY_NOTICES.md;
+                            ..\..\deploy\Settings.Lua;
+                            ..\..\deploy\workshop-cover-0.31.jpg;
+                            ..\..\deploy\workshop-detail-0.31-01-npc-actions.jpg;
+                            ..\..\deploy\workshop-detail-0.31-02-linger.jpg;
+                            ..\..\deploy\workshop-detail-0.31-03-living-memory.jpg;
+                            ..\..\deploy\workshop-detail-0.31-04-group-actions.jpg;
+                            ..\..\deploy\workshop-detail-0.31-05-companion-monthly.jpg;
+                            ..\..\deploy\workshop-detail-0.31-06-monthly-saga.jpg;
+                            ..\..\deploy\workshop-detail-0.31-07-chat-experience.jpg;
+                            ..\..\deploy\workshop-detail-0.31-08-persona-world.jpg" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\JianghuYouling.Core\JianghuYouling.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="TaiwuModdingLib"><HintPath>$(Managed)\TaiwuModdingLib.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="0Harmony"><HintPath>$(Managed)\0Harmony.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Assembly-CSharp"><HintPath>$(Managed)\Assembly-CSharp.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Steamworks.NET"><HintPath>$(Managed)\Steamworks.NET.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="GameData.Shared"><HintPath>$(Managed)\GameData.Shared.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine"><HintPath>$(Managed)\UnityEngine.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.CoreModule"><HintPath>$(Managed)\UnityEngine.CoreModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.InputLegacyModule"><HintPath>$(Managed)\UnityEngine.InputLegacyModule.dll</HintPath><Private>false</Private></Reference>   <!-- ConfigHost 热键 Input.GetKeyDown -->
+    <Reference Include="System.Threading.Tasks" />   <!-- net48 Task/Task.Run -->
+    <Reference Include="System.Threading" />
+    <Reference Include="Newtonsoft.Json"><HintPath>$(Managed)\Newtonsoft.Json.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="GameData.Serializer"><HintPath>$(Managed)\GameData.Serializer.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="GameData.Utilities"><HintPath>$(Managed)\GameData.Utilities.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="GameData.Utilities.Structure"><HintPath>$(Managed)\GameData.Utilities.Structure.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.UIModule"><HintPath>$(Managed)\UnityEngine.UIModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.UI"><HintPath>$(Managed)\UnityEngine.UI.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.IMGUIModule"><HintPath>$(Managed)\UnityEngine.IMGUIModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Unity.TextMeshPro"><HintPath>$(Managed)\Unity.TextMeshPro.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.TextRenderingModule"><HintPath>$(Managed)\UnityEngine.TextRenderingModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.ImageConversionModule"><HintPath>$(Managed)\UnityEngine.ImageConversionModule.dll</HintPath><Private>false</Private></Reference>
+    <!-- 语音:播放(AudioSource/AudioClip)+ 网络多媒体载入(UnityWebRequestMultimedia) -->
+    <Reference Include="UnityEngine.AudioModule"><HintPath>$(Managed)\UnityEngine.AudioModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.UnityWebRequestModule"><HintPath>$(Managed)\UnityEngine.UnityWebRequestModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.UnityWebRequestAudioModule"><HintPath>$(Managed)\UnityEngine.UnityWebRequestAudioModule.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+
+  <!-- 编译后自动部署 DLL 到游戏 Mod\JianghuYouling\Plugins -->
+  <!-- Debug/analysis builds must never overwrite the player's live Mod. Final deployment is Release-only. -->
+  <Target Name="DeployToGame" AfterTargets="Build" Condition="'$(Configuration)' == 'Release'">
+    <MakeDir Directories="$(ModDeploy)" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(ModDeploy)" SkipUnchangedFiles="false" />
+    <Copy SourceFiles="$(TargetDir)JianghuYouling.Core.dll" DestinationFolder="$(ModDeploy)" SkipUnchangedFiles="false" />
+    <!-- mod 清单(含模组管理设置页声明)同步到 mod 根目录 -->
+    <Copy SourceFiles="$(MSBuildThisFileDirectory)..\..\deploy\Config.lua" DestinationFolder="$(ModDeploy)\.." SkipUnchangedFiles="false" />
+    <Copy SourceFiles="@(WorkshopAsset)" DestinationFolder="$(ModDeploy)\.." SkipUnchangedFiles="false" />
+    <!-- 同步到工坊用的中文名目录(若存在):Config + 前端/Core DLL,免手动复制 -->
+    <MakeDir Directories="$(PublishDeploy)\Plugins" Condition="Exists('$(PublishDeploy)')" />
+    <Copy SourceFiles="$(TargetPath);$(TargetDir)JianghuYouling.Core.dll" DestinationFolder="$(PublishDeploy)\Plugins" SkipUnchangedFiles="false" Condition="Exists('$(PublishDeploy)')" />
+    <Copy SourceFiles="$(MSBuildThisFileDirectory)..\..\deploy\Config.lua" DestinationFolder="$(PublishDeploy)" SkipUnchangedFiles="false" Condition="Exists('$(PublishDeploy)')" />
+    <Copy SourceFiles="@(WorkshopAsset)" DestinationFolder="$(PublishDeploy)" SkipUnchangedFiles="false" Condition="Exists('$(PublishDeploy)')" />
+  </Target>
+
+</Project>

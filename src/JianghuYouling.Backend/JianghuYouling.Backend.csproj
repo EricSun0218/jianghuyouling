@@ -1,0 +1,48 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>JianghuYouling.Backend</AssemblyName>
+    <RootNamespace>JianghuYouling.Backend</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <Deterministic>true</Deterministic>
+    <EnableDefaultCompileItems>true</EnableDefaultCompileItems>
+    <!-- 后端域 DLL(游戏后端 .NET 8) -->
+    <Backend>$(TaiwuGameDir)\Backend</Backend>
+    <ModDeploy>$(TaiwuGameDir)\Mod\JianghuYouling\Plugins</ModDeploy>
+    <!-- 工坊上传用的中文名目录;构建时若存在则一并同步后端 DLL -->
+    <PublishDeploy>$(TaiwuWorkshopDir)</PublishDeploy>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\Shared\RpcConst.cs" Link="Shared\RpcConst.cs" />
+    <Compile Include="..\Shared\ItemNameMatcher.cs" Link="Shared\ItemNameMatcher.cs" />
+    <Compile Include="..\Shared\OperationReceiptCommitPolicy.cs" Link="Shared\OperationReceiptCommitPolicy.cs" />
+    <Compile Include="..\JianghuYouling.Core\Behavior\MonthlyPoisonPolicy.cs" Link="Shared\MonthlyPoisonPolicy.cs" />
+    <Compile Include="..\JianghuYouling.Core\Behavior\TaiwuScenePresencePolicy.cs" Link="Shared\TaiwuScenePresencePolicy.cs" />
+    <Compile Include="..\JianghuYouling.Core\Commission\CommissionRewardPolicy.cs" Link="Shared\CommissionRewardPolicy.cs" />
+    <Compile Include="..\JianghuYouling.Core\Commission\CommissionProgressPolicy.cs" Link="Shared\CommissionProgressPolicy.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="GameData"><HintPath>$(Backend)\GameData.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="GameData.Shared"><HintPath>$(Backend)\GameData.Shared.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="GameData.Combat.Math"><HintPath>$(Backend)\GameData.Combat.Math.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="GameData.Serializer"><HintPath>$(Backend)\GameData.Serializer.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="GameData.Utilities"><HintPath>$(Backend)\GameData.Utilities.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="GameData.ArchiveData"><HintPath>$(Backend)\GameData.ArchiveData.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="TaiwuModdingLib"><HintPath>$(Backend)\TaiwuModdingLib.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="0Harmony"><HintPath>$(Backend)\0Harmony.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Redzen"><HintPath>$(Backend)\Redzen.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+
+  <!-- Debug/analysis builds must never overwrite the player's live Mod. Final deployment is Release-only. -->
+  <Target Name="DeployToGame" AfterTargets="Build" Condition="'$(Configuration)' == 'Release'">
+    <MakeDir Directories="$(ModDeploy)" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(ModDeploy)" SkipUnchangedFiles="false" />
+    <!-- 同步后端 DLL 到工坊用的中文名目录(若存在),免手动复制 -->
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(PublishDeploy)\Plugins" SkipUnchangedFiles="false" Condition="Exists('$(PublishDeploy)')" />
+  </Target>
+
+</Project>

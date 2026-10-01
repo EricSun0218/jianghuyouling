@@ -1,0 +1,6 @@
+# 特殊人设/世界书嵌入资源与清单按 SHA-256 逐字节钉死(manifest + DevTest 嵌入哈希校验
+# + 预检确定性重导)。git 的 eol 归一化会在 checkout 时把 LF 重写成 CRLF,直接击穿全部
+# 哈希门禁——这些文件必须按原始字节存取。
+* text=auto
+*.ps1 text eol=crlf
+src/JianghuYouling.Core/Persona/Resources/** -text

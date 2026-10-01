@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <RootNamespace>JianghuYouling.Core</RootNamespace>
+    <AssemblyName>JianghuYouling.Core</AssemblyName>
+    <LangVersion>latest</LangVersion>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+
+  <!-- Core = 纯逻辑,不依赖 Unity/游戏域,可独立单测 -->
+  <ItemGroup>
+    <Compile Include="..\Shared\ItemNameMatcher.cs" Link="Shared\ItemNameMatcher.cs" />
+    <Compile Include="..\Shared\OperationReceiptCommitPolicy.cs" Link="Shared\OperationReceiptCommitPolicy.cs" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <Reference Include="System.Net.Http" />
+    <Reference Include="System.Security" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 行动指南与灵儿知识技能以独立资源包存在，但嵌入 Core DLL，部署时不增加易丢失的散文件。 -->
+    <EmbeddedResource Include="ActionSkills\**\*.md" />
+    <EmbeddedResource Include="AssistantSkills\**\*.md" />
+    <EmbeddedResource Include="Persona\Resources\*.txt">
+      <LogicalName>JianghuYouling.Core.Persona.Resources.%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Persona\Resources\*.json">
+      <LogicalName>JianghuYouling.Core.Persona.Resources.%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+</Project>

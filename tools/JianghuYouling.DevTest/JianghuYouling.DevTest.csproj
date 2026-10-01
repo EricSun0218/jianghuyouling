@@ -1,0 +1,52 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="System.Net.Http" />
+    <ProjectReference Include="..\..\src\JianghuYouling.Core\JianghuYouling.Core.csproj" />
+    <!-- Compile the production shortcut state machine into the offline harness with tiny Unity stubs. -->
+    <Compile Include="..\..\src\JianghuYouling.Frontend\UI\WindowsDictation.cs" Link="Production\WindowsDictation.cs" />
+    <!-- Compile the production group transcript orchestrator so archive/delete/clear persistence
+         paths run for real against temp directories (stubs cover Unity/game/LLM surfaces only). -->
+    <Compile Include="..\..\src\JianghuYouling.Frontend\Talk\GroupChatOrchestrator.cs" Link="Production\GroupChatOrchestrator.cs" />
+    <!-- Compile the production saga store so world-identity adoption for legacy (≤v0.29)
+         sagas and the fail-closed durability contracts run for real against temp dirs. -->
+    <Compile Include="..\..\src\JianghuYouling.Frontend\Game\EventSagaStore.cs" Link="Production\EventSagaStore.cs" />
+    <!-- Compile the production monthly digest archive so companion-first/event-later merging
+         and idempotent event upserts run against real durable files. -->
+    <Compile Include="..\..\src\JianghuYouling.Frontend\Game\EventLogStore.cs" Link="Production\EventLogStore.cs" />
+    <!-- Compile durable text settings used by monthly event prose and ghostwriting. -->
+    <Compile Include="..\..\src\JianghuYouling.Frontend\Game\DurableSettingsStore.cs" Link="Production\DurableSettingsStore.cs" />
+    <Compile Include="..\..\src\JianghuYouling.Frontend\Game\ThinkingPromptRuleStore.cs" Link="Production\ThinkingPromptRuleStore.cs" />
+    <Compile Include="..\..\src\JianghuYouling.Frontend\Game\ImageGenerationConfig.cs" Link="Production\ImageGenerationConfig.cs" />
+    <Compile Include="..\..\src\JianghuYouling.Frontend\Game\AssistantEnabledStore.cs" Link="Production\AssistantEnabledStore.cs" />
+    <Compile Include="..\..\src\JianghuYouling.Frontend\Game\AssistantProactiveStore.cs" Link="Production\AssistantProactiveStore.cs" />
+    <Compile Include="..\..\src\JianghuYouling.Frontend\Game\NpcProactiveChatStore.cs" Link="Production\NpcProactiveChatStore.cs" />
+    <Compile Include="..\..\src\JianghuYouling.Frontend\Game\NpcChatUnreadStore.cs" Link="Production\NpcChatUnreadStore.cs" />
+    <Compile Include="..\..\src\JianghuYouling.Frontend\Game\GhostwriteLengthStore.cs" Link="Production\GhostwriteLengthStore.cs" />
+    <Compile Include="..\..\src\JianghuYouling.Frontend\Game\GhostwriteSelfLearningStore.cs" Link="Production\GhostwriteSelfLearningStore.cs" />
+    <Compile Include="..\..\src\JianghuYouling.Frontend\Game\GhostwriteLearningContext.cs" Link="Production\GhostwriteLearningContext.cs" />
+    <Compile Include="..\..\src\JianghuYouling.Frontend\Game\CompanionMonthlyStore.cs" Link="Production\CompanionMonthlyStore.cs" />
+    <Compile Include="..\..\src\JianghuYouling.Frontend\Game\MonthlyDigestPopupStore.cs" Link="Production\MonthlyDigestPopupStore.cs" />
+    <Compile Include="..\..\src\JianghuYouling.Frontend\Game\MonthlyChronicleNoticeStore.cs" Link="Production\MonthlyChronicleNoticeStore.cs" />
+    <Compile Include="..\..\src\JianghuYouling.Frontend\Game\MonthlyChronicleProgressStore.cs" Link="Production\MonthlyChronicleProgressStore.cs" />
+    <Compile Include="..\..\src\JianghuYouling.Frontend\Game\CompanionMonthlyCandidateStore.cs" Link="Production\CompanionMonthlyCandidateStore.cs" />
+    <Compile Include="..\..\src\JianghuYouling.Frontend\Game\ArchivedCharacterStatusStore.cs" Link="Production\ArchivedCharacterStatusStore.cs" />
+    <Compile Include="..\..\src\JianghuYouling.Frontend\Game\CharacterProxyIdentityService.cs" Link="Production\CharacterProxyIdentityService.cs" />
+    <Compile Include="..\..\src\JianghuYouling.Frontend\Game\ConversationNavigationStore.cs" Link="Production\ConversationNavigationStore.cs" />
+    <Compile Include="..\..\src\JianghuYouling.Frontend\Game\WorldBookStore.cs" Link="Production\WorldBookStore.cs" />
+    <Compile Include="..\..\src\JianghuYouling.Frontend\Game\StructuredWorldBookStore.cs" Link="Production\StructuredWorldBookStore.cs" />
+    <Compile Include="..\..\src\JianghuYouling.Frontend\Talk\ConversationSessionIndexStore.cs" Link="Production\ConversationSessionIndexStore.cs" />
+    <Compile Include="..\..\src\JianghuYouling.Frontend\UI\LongTextEditorOperationGate.cs" Link="Production\LongTextEditorOperationGate.cs" />
+    <Compile Include="..\..\src\JianghuYouling.Frontend\Game\MonthlyAgentRequestBudget.cs" Link="Production\MonthlyAgentRequestBudget.cs" />
+    <Compile Include="..\..\src\JianghuYouling.Frontend\Game\SettingsBatchTransaction.cs" Link="Production\SettingsBatchTransaction.cs" />
+    <Compile Include="..\..\src\JianghuYouling.Frontend\Game\LlmProfileStore.cs" Link="Production\LlmProfileStore.cs" />
+  </ItemGroup>
+
+</Project>

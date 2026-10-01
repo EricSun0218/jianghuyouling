@@ -1,0 +1,636 @@
+{
+    "schemaVersion":  1,
+    "sanitizerVersion":  "jyl-special-persona-sanitizer-v3",
+    "mappingAuthority":  {
+                             "namespace":  "Config.Character.TemplateId",
+                             "runtimeField":  "GameData.Domains.Character.Display.CharacterDisplayData.TemplateId",
+                             "configMapping":  "StreamingAssets/ConfigRefNameMapping/Character.ref.txt",
+                             "taiwuVersion":  "1.0.72",
+                             "steamBuildId":  "24769549"
+                         },
+    "cricketFallback":  {
+                            "firstTemplateId":  968,
+                            "lastTemplateId":  1011,
+                            "genderAuthority":  "StreamingAssets/ConfigRefNameMapping/Character.ref.txt: even TemplateId=男, odd TemplateId=女",
+                            "maleResourceFile":  "persona-cricket-common-male.txt",
+                            "femaleResourceFile":  "persona-cricket-common.txt",
+                            "maleTemplateIds":  [
+                                                    968,
+                                                    970,
+                                                    972,
+                                                    974,
+                                                    976,
+                                                    978,
+                                                    980,
+                                                    982,
+                                                    984,
+                                                    986,
+                                                    988,
+                                                    990,
+                                                    992,
+                                                    994,
+                                                    996,
+                                                    998,
+                                                    1000,
+                                                    1002,
+                                                    1004,
+                                                    1006,
+                                                    1008,
+                                                    1010
+                                                ],
+                            "femaleTemplateIds":  [
+                                                      969,
+                                                      971,
+                                                      973,
+                                                      975,
+                                                      977,
+                                                      979,
+                                                      981,
+                                                      983,
+                                                      985,
+                                                      987,
+                                                      989,
+                                                      991,
+                                                      993,
+                                                      995,
+                                                      997,
+                                                      999,
+                                                      1001,
+                                                      1003,
+                                                      1005,
+                                                      1007,
+                                                      1009,
+                                                      1011
+                                                  ]
+                        },
+    "entries":  [
+                    {
+                        "key":  "jinhuang",
+                        "displayName":  "金凰儿",
+                        "sourceFile":  "金凰儿角色卡.txt",
+                        "resourceFile":  "persona-jinhuang.txt",
+                        "role":  "character",
+                        "characterTemplateIds":  [
+                                                     66,
+                                                     67,
+                                                     68,
+                                                     69,
+                                                     70,
+                                                     71,
+                                                     72,
+                                                     73,
+                                                     74,
+                                                     147,
+                                                     148,
+                                                     149,
+                                                     150,
+                                                     151,
+                                                     152,
+                                                     153,
+                                                     154,
+                                                     155,
+                                                     204,
+                                                     213,
+                                                     1091
+                                                 ],
+                        "sourceSha256":  "f900f9fc51b1b5b3cbba22a36445581753988047cf169b58442090919604cc42",
+                        "sanitizedSha256":  "6eac0d4f68a3ad1640eed9c8fc49c95e7cd8338c3c3f9411236de45eeb35566b",
+                        "sanitizedCharacters":  4249,
+                        "removedSections":  1,
+                        "removedLines":  10
+                    },
+                    {
+                        "key":  "jixi",
+                        "displayName":  "姬穸",
+                        "sourceFile":  "姬穸角色卡.txt",
+                        "resourceFile":  "persona-jixi.txt",
+                        "role":  "character",
+                        "characterTemplateIds":  [
+                                                     877,
+                                                     878,
+                                                     879
+                                                 ],
+                        "sourceSha256":  "40a19a1f57a82ee7343cda1302b069d25e4ac57d0d0355a7b1dcf1988b8091df",
+                        "sanitizedSha256":  "df8bed72ebfdf317b3f878eefd2c3a397b3c1acb98659764b98493535f97af0a",
+                        "sanitizedCharacters":  5404,
+                        "removedSections":  1,
+                        "removedLines":  12
+                    },
+                    {
+                        "key":  "longyufu",
+                        "displayName":  "龙语茯",
+                        "sourceFile":  "龙语茯角色卡.txt",
+                        "resourceFile":  "persona-longyufu.txt",
+                        "role":  "character",
+                        "characterTemplateIds":  [
+                                                     913
+                                                 ],
+                        "sourceSha256":  "a169fb039cfe9662e5b71a4176946cba2dd9bf07fd0408376b4e56797e4efdd1",
+                        "sanitizedSha256":  "a2be6c6fead42fca3f40f61ca405255a4d89ede63d99102e73ab651fc0047017",
+                        "sanitizedCharacters":  2589,
+                        "removedSections":  0,
+                        "removedLines":  3
+                    },
+                    {
+                        "key":  "ranchenzi",
+                        "displayName":  "染尘子",
+                        "sourceFile":  "染尘子角色卡.txt",
+                        "resourceFile":  "persona-ranchenzi.txt",
+                        "role":  "character",
+                        "characterTemplateIds":  [
+                                                     916,
+                                                     917,
+                                                     918
+                                                 ],
+                        "sourceSha256":  "4d4c103fb26948c08b30c2e7cdaa2723804950b4666120e751d8172f52cd6e2e",
+                        "sanitizedSha256":  "08bba096dc3241e790fe887f7839f6c7c3c01d82be182093dba51946d8905c95",
+                        "sanitizedCharacters":  3030,
+                        "removedSections":  0,
+                        "removedLines":  3
+                    },
+                    {
+                        "key":  "tiandi",
+                        "displayName":  "天帝",
+                        "sourceFile":  "天帝角色卡.txt",
+                        "resourceFile":  "persona-tiandi.txt",
+                        "role":  "character",
+                        "characterTemplateIds":  [
+                                                     1113
+                                                 ],
+                        "sourceSha256":  "983ffb0759e3336289373fba32b26dbd974120b42a034191514848f72566ad4f",
+                        "sanitizedSha256":  "e67367f1e3a1f6b14b23e08e8fdf256825fae8d381f7a7384ce539ba0678c5f3",
+                        "sanitizedCharacters":  2220,
+                        "removedSections":  0,
+                        "removedLines":  3
+                    },
+                    {
+                        "key":  "cricket-common-female",
+                        "displayName":  "促织化形女通用",
+                        "sourceFile":  "蛐蛐化形通用角色卡.txt",
+                        "resourceFile":  "persona-cricket-common.txt",
+                        "role":  "cricket-fallback-female",
+                        "characterTemplateIds":  [
+                                                     969,
+                                                     971,
+                                                     973,
+                                                     975,
+                                                     977,
+                                                     979,
+                                                     981,
+                                                     983,
+                                                     985,
+                                                     987,
+                                                     989,
+                                                     991,
+                                                     993,
+                                                     995,
+                                                     997,
+                                                     999,
+                                                     1001,
+                                                     1003,
+                                                     1005,
+                                                     1007,
+                                                     1009,
+                                                     1011
+                                                 ],
+                        "sourceSha256":  "94d7f88d104f198cfc6e1aaea2a809e0eade4e2998c175c4167502eeb484e191",
+                        "sanitizedSha256":  "8bad83704a4255dbf4658c9a09cdeef5e897df4b0f953d5c2404fb9bd9802135",
+                        "sanitizedCharacters":  2246,
+                        "removedSections":  1,
+                        "removedLines":  9
+                    },
+                    {
+                        "key":  "cricket-common-male",
+                        "displayName":  "促织化形男通用",
+                        "sourceFile":  "蛐蛐化形通用角色卡.txt",
+                        "resourceFile":  "persona-cricket-common-male.txt",
+                        "role":  "cricket-fallback-male",
+                        "characterTemplateIds":  [
+                                                     968,
+                                                     970,
+                                                     972,
+                                                     974,
+                                                     976,
+                                                     978,
+                                                     980,
+                                                     982,
+                                                     984,
+                                                     986,
+                                                     988,
+                                                     990,
+                                                     992,
+                                                     994,
+                                                     996,
+                                                     998,
+                                                     1000,
+                                                     1002,
+                                                     1004,
+                                                     1006,
+                                                     1008,
+                                                     1010
+                                                 ],
+                        "sourceSha256":  "94d7f88d104f198cfc6e1aaea2a809e0eade4e2998c175c4167502eeb484e191",
+                        "sanitizedSha256":  "0978aa8c1d59e08e8124156e5acc4d5553baae9975014438e1f187f508c65b51",
+                        "sanitizedCharacters":  2248,
+                        "removedSections":  1,
+                        "removedLines":  9
+                    },
+                    {
+                        "key":  "cricket-daiwu",
+                        "displayName":  "呆物娘",
+                        "sourceFile":  "呆物娘角色卡.txt",
+                        "resourceFile":  "persona-cricket-daiwu.txt",
+                        "role":  "character",
+                        "characterTemplateIds":  [
+                                                     969
+                                                 ],
+                        "sourceSha256":  "2169d253fb6ce3ba5dc6b1ed415305cf3a063ff195323bcaafe8f90729e49dc1",
+                        "sanitizedSha256":  "e99ef89bb657b2df61e5187b6945620bad60caf7e59478e9171494a5f590b19d",
+                        "sanitizedCharacters":  1244,
+                        "removedSections":  1,
+                        "removedLines":  9
+                    },
+                    {
+                        "key":  "cricket-xiuhuazhen",
+                        "displayName":  "绣花针娘",
+                        "sourceFile":  "绣花针娘角色卡.txt",
+                        "resourceFile":  "persona-cricket-xiuhuazhen.txt",
+                        "role":  "character",
+                        "characterTemplateIds":  [
+                                                     971
+                                                 ],
+                        "sourceSha256":  "136f2968c87e7004af34c174a773de064d3a2b531d364092d09de0069bbb89be",
+                        "sanitizedSha256":  "da955715c55ee40dfc48903e77c50e77750183de36035bf457c9a54392685620",
+                        "sanitizedCharacters":  963,
+                        "removedSections":  1,
+                        "removedLines":  8
+                    },
+                    {
+                        "key":  "cricket-liangtouqiang",
+                        "displayName":  "两头枪娘",
+                        "sourceFile":  "两头枪娘角色卡.txt",
+                        "resourceFile":  "persona-cricket-liangtouqiang.txt",
+                        "role":  "character",
+                        "characterTemplateIds":  [
+                                                     973
+                                                 ],
+                        "sourceSha256":  "f7af2b65fd5cc922ecdd6affe740fe75d1799485965fb876b59374243bceb571",
+                        "sanitizedSha256":  "f27f7901193d4a3b8436d52897d4b2f530c12ed4d60be404963eea09804d16e5",
+                        "sanitizedCharacters":  908,
+                        "removedSections":  1,
+                        "removedLines":  7
+                    },
+                    {
+                        "key":  "cricket-chuiling",
+                        "displayName":  "吹铃娘",
+                        "sourceFile":  "吹铃娘角色卡.txt",
+                        "resourceFile":  "persona-cricket-chuiling.txt",
+                        "role":  "character",
+                        "characterTemplateIds":  [
+                                                     975
+                                                 ],
+                        "sourceSha256":  "bf2427717a8747fc29c8c45e20454008080bfe9acdd211b430dc81409cb6e020",
+                        "sanitizedSha256":  "7647be421fd0263fe6cca4c49e52ab1cfa0488665ad0bb7bdc97a562a947275f",
+                        "sanitizedCharacters":  879,
+                        "removedSections":  1,
+                        "removedLines":  8
+                    },
+                    {
+                        "key":  "cricket-paomahuang",
+                        "displayName":  "跑马黄娘",
+                        "sourceFile":  "跑马黄娘角色卡.txt",
+                        "resourceFile":  "persona-cricket-paomahuang.txt",
+                        "role":  "character",
+                        "characterTemplateIds":  [
+                                                     977
+                                                 ],
+                        "sourceSha256":  "f4aa6fc77663b2ae36163bce18903f06aca99174ba0f365966f95ce56e1eeb5a",
+                        "sanitizedSha256":  "80ee1b445de51596646088f3354125f6e23d817c0e36ffed772295a60a7c3108",
+                        "sanitizedCharacters":  922,
+                        "removedSections":  1,
+                        "removedLines":  8
+                    },
+                    {
+                        "key":  "cricket-yuchutou",
+                        "displayName":  "玉锄头娘",
+                        "sourceFile":  "玉锄头娘角色卡.txt",
+                        "resourceFile":  "persona-cricket-yuchutou.txt",
+                        "role":  "character",
+                        "characterTemplateIds":  [
+                                                     979
+                                                 ],
+                        "sourceSha256":  "ee798de09cac7cae396f6ee4cef3785419a4bfd574753eb4a54d28bac5e925e0",
+                        "sanitizedSha256":  "54b0e9306809a7706ed9765e7c47a6370bec479e958a68ce999d2dd714ca1ce5",
+                        "sanitizedCharacters":  903,
+                        "removedSections":  1,
+                        "removedLines":  6
+                    },
+                    {
+                        "key":  "cricket-pipaoxuanjia",
+                        "displayName":  "披袍轩甲娘",
+                        "sourceFile":  "披袍轩甲娘角色卡.txt",
+                        "resourceFile":  "persona-pipaoxuanjia.txt",
+                        "role":  "character",
+                        "characterTemplateIds":  [
+                                                     981
+                                                 ],
+                        "sourceSha256":  "6e913024490ad9b3e2774b817636c95781106a1edbe3a6488ac51d7d17062234",
+                        "sanitizedSha256":  "bbc8f4e713ba374c56055c8ed9e82b38561ce9f0c2d89e6ff366c5b35ad23a53",
+                        "sanitizedCharacters":  930,
+                        "removedSections":  1,
+                        "removedLines":  7
+                    },
+                    {
+                        "key":  "cricket-fanshengming",
+                        "displayName":  "反生名娘",
+                        "sourceFile":  "反生名娘角色卡.txt",
+                        "resourceFile":  "persona-cricket-fanshengming.txt",
+                        "role":  "character",
+                        "characterTemplateIds":  [
+                                                     983
+                                                 ],
+                        "sourceSha256":  "3b646165780b65950ec31815c99d8d48906746b71e0d52ce2af2ae446f2411c6",
+                        "sanitizedSha256":  "8dda8d5dedeaa9ff121773eb7d720bb052144dc7fa2a28821e408fb2f8335d7d",
+                        "sanitizedCharacters":  876,
+                        "removedSections":  1,
+                        "removedLines":  7
+                    },
+                    {
+                        "key":  "cricket-zhushae",
+                        "displayName":  "朱砂额娘",
+                        "sourceFile":  "朱砂额娘角色卡.txt",
+                        "resourceFile":  "persona-cricket-zhushae.txt",
+                        "role":  "character",
+                        "characterTemplateIds":  [
+                                                     985
+                                                 ],
+                        "sourceSha256":  "2e8d20dcddf95beed78c9084bbb8f9e94c6241091b8c3e2eb9a69ad657bf9cf9",
+                        "sanitizedSha256":  "0dad0ac4424a4f10e8cd76a633b7b66777290574047f4a46ff06cdf4bfc10e47",
+                        "sanitizedCharacters":  955,
+                        "removedSections":  1,
+                        "removedLines":  8
+                    },
+                    {
+                        "key":  "cricket-toutuo",
+                        "displayName":  "头陀娘",
+                        "sourceFile":  "头陀娘角色卡.txt",
+                        "resourceFile":  "persona-cricket-toutuo.txt",
+                        "role":  "character",
+                        "characterTemplateIds":  [
+                                                     987
+                                                 ],
+                        "sourceSha256":  "167a8bde3e1f82f5eb77e2c92ca4025b61333449f9b7bc058a8e18f2966ce8eb",
+                        "sanitizedSha256":  "032d443a558329e185cb5109cb50d5d125f37af2cbe158af949d751c6238e4a1",
+                        "sanitizedCharacters":  932,
+                        "removedSections":  1,
+                        "removedLines":  7
+                    },
+                    {
+                        "key":  "cricket-tiedanzi",
+                        "displayName":  "铁弹子娘",
+                        "sourceFile":  "铁弹子娘角色卡.txt",
+                        "resourceFile":  "persona-cricket-tiedanzi.txt",
+                        "role":  "character",
+                        "characterTemplateIds":  [
+                                                     989
+                                                 ],
+                        "sourceSha256":  "b377ae89806ad0db5072142ea08b00384b074339252875a2dc5e919802f153f6",
+                        "sanitizedSha256":  "fe1a188564ed449886c723bbeb3b7067f635a303977ad6dccd9cd5328cec87e5",
+                        "sanitizedCharacters":  932,
+                        "removedSections":  1,
+                        "removedLines":  7
+                    },
+                    {
+                        "key":  "cricket-chixu",
+                        "displayName":  "赤须娘",
+                        "sourceFile":  "赤须娘角色卡.txt",
+                        "resourceFile":  "persona-cricket-chixu.txt",
+                        "role":  "character",
+                        "characterTemplateIds":  [
+                                                     991
+                                                 ],
+                        "sourceSha256":  "73875541de6ab8715b5c54b6d4d53b972b50f1632e385cd9b06725f6d49d22c0",
+                        "sanitizedSha256":  "272e1cbc574ba921d342a2e66ec7a6c2266db9523b6e51df6ba715bd317a338a",
+                        "sanitizedCharacters":  916,
+                        "removedSections":  1,
+                        "removedLines":  7
+                    },
+                    {
+                        "key":  "cricket-yuwei",
+                        "displayName":  "玉尾娘",
+                        "sourceFile":  "玉尾娘角色卡.txt",
+                        "resourceFile":  "persona-cricket-yuwei.txt",
+                        "role":  "character",
+                        "characterTemplateIds":  [
+                                                     993
+                                                 ],
+                        "sourceSha256":  "4aa9f045e4197f805b4fe5dc1d108068a6de251a45ee4c92e5b5859a7cad1dff",
+                        "sanitizedSha256":  "5e4a76782819c2286f8525b95e5f478be9ec3aa98ee10bcd187c08201a52ec61",
+                        "sanitizedCharacters":  909,
+                        "removedSections":  1,
+                        "removedLines":  7
+                    },
+                    {
+                        "key":  "cricket-youzhideng",
+                        "displayName":  "油纸灯娘",
+                        "sourceFile":  "油纸灯娘角色卡.txt",
+                        "resourceFile":  "persona-cricket-youzhideng.txt",
+                        "role":  "character",
+                        "characterTemplateIds":  [
+                                                     995
+                                                 ],
+                        "sourceSha256":  "f17a0717fb89f85af86b3fa6a995c10b91542071bf272da00f17aac93b579f3d",
+                        "sanitizedSha256":  "239acca19abd2b99a2ae03e433155ed15e68210b04bbbc652df30a6bbf3838fd",
+                        "sanitizedCharacters":  878,
+                        "removedSections":  1,
+                        "removedLines":  8
+                    },
+                    {
+                        "key":  "cricket-zhensanse",
+                        "displayName":  "真三色娘",
+                        "sourceFile":  "真三色娘角色卡.txt",
+                        "resourceFile":  "persona-cricket-zhensanse.txt",
+                        "role":  "character",
+                        "characterTemplateIds":  [
+                                                     997
+                                                 ],
+                        "sourceSha256":  "bed1ff62de8b4c52c7a9d7472aec28e053b4ea3610693c3539c2025ddb39d0e3",
+                        "sanitizedSha256":  "06b64b132a5b95fe517f70eb3a480077fa6c0edf745ad2a937f1b858dca33cbb",
+                        "sanitizedCharacters":  925,
+                        "removedSections":  1,
+                        "removedLines":  7
+                    },
+                    {
+                        "key":  "cricket-caosanduan",
+                        "displayName":  "草三段娘",
+                        "sourceFile":  "草三段娘角色卡.txt",
+                        "resourceFile":  "persona-cricket-caosanduan.txt",
+                        "role":  "character",
+                        "characterTemplateIds":  [
+                                                     999
+                                                 ],
+                        "sourceSha256":  "4ce45c41a00a01f645b5e2d47195823c08347c365eb5f9cc7687d476d887e4fb",
+                        "sanitizedSha256":  "a2db2edc3ccb56d280c21e948a45f5b3bfc0dcee06cc446c440075d0bbe59cc0",
+                        "sanitizedCharacters":  898,
+                        "removedSections":  1,
+                        "removedLines":  7
+                    },
+                    {
+                        "key":  "cricket-zhenzihuang",
+                        "displayName":  "真紫黄娘",
+                        "sourceFile":  "真紫黄娘角色卡.txt",
+                        "resourceFile":  "persona-cricket-zhenzihuang.txt",
+                        "role":  "character",
+                        "characterTemplateIds":  [
+                                                     1001
+                                                 ],
+                        "sourceSha256":  "fb55b20f113677311291bde3bbd6737117bcc693c47460475b5823ecb8754a00",
+                        "sanitizedSha256":  "77f25a726519d54d3738e9d9c7de316c342f83aceb70c37c1b2f09afd8ad07a8",
+                        "sanitizedCharacters":  886,
+                        "removedSections":  1,
+                        "removedLines":  8
+                    },
+                    {
+                        "key":  "cricket-meihuachi",
+                        "displayName":  "梅花翅娘",
+                        "sourceFile":  "梅花翅娘角色卡.txt",
+                        "resourceFile":  "persona-cricket-meihuachi.txt",
+                        "role":  "character",
+                        "characterTemplateIds":  [
+                                                     1003
+                                                 ],
+                        "sourceSha256":  "ed8f41a8c6ec3deab6b0965331513856a625ad47bd264fc1a2942fb0864958d3",
+                        "sanitizedSha256":  "df520ad13ba45d3d5622f67301af417f54436c21adf5d6c32639ac656595e4de",
+                        "sanitizedCharacters":  905,
+                        "removedSections":  1,
+                        "removedLines":  7
+                    },
+                    {
+                        "key":  "cricket-tianlanqing",
+                        "displayName":  "天蓝青娘",
+                        "sourceFile":  "天蓝青娘角色卡.txt",
+                        "resourceFile":  "persona-cricket-tianlanqing.txt",
+                        "role":  "character",
+                        "characterTemplateIds":  [
+                                                     1005
+                                                 ],
+                        "sourceSha256":  "65d2f82542d4d530a27f4e2a8e8b2134a83f20da24580cf81dae8c28db09d761",
+                        "sanitizedSha256":  "0ed202f8eba8f38e1a8ab575070e5ab1cb0ae29fd277395fd6389917924caba7",
+                        "sanitizedCharacters":  900,
+                        "removedSections":  1,
+                        "removedLines":  8
+                    },
+                    {
+                        "key":  "cricket-sanduanjin",
+                        "displayName":  "三段锦娘",
+                        "sourceFile":  "段锦娘角色卡.txt",
+                        "resourceFile":  "persona-cricket-sanduanjin.txt",
+                        "role":  "character",
+                        "characterTemplateIds":  [
+                                                     1007
+                                                 ],
+                        "sourceSha256":  "2f85c6d3f8b3b4d318d5dd91b3838a3aae5e807a623bb4ac7691e60bcdffb12a",
+                        "sanitizedSha256":  "ed66bdaa970f730f9dcffa530a1e748934e363f49030b3cbd345c7273cd4a0b7",
+                        "sanitizedCharacters":  991,
+                        "removedSections":  1,
+                        "removedLines":  7
+                    },
+                    {
+                        "key":  "cricket-santaizi",
+                        "displayName":  "三太子娘",
+                        "sourceFile":  "三太子娘角色卡.txt",
+                        "resourceFile":  "persona-cricket-santaizi.txt",
+                        "role":  "character",
+                        "characterTemplateIds":  [
+                                                     1009
+                                                 ],
+                        "sourceSha256":  "2c164fbab33d492fe05ca42f1fbe54da84b8a392fe332ead0dc4bc5b5abbcc3a",
+                        "sanitizedSha256":  "a67d88937edd944a9654827cb9331dd831c2bbb4707084cb2f6c2246d108d2fc",
+                        "sanitizedCharacters":  941,
+                        "removedSections":  1,
+                        "removedLines":  7
+                    },
+                    {
+                        "key":  "cricket-babai",
+                        "displayName":  "八败娘",
+                        "sourceFile":  "八败娘角色卡.txt",
+                        "resourceFile":  "persona-cricket-babai.txt",
+                        "role":  "character",
+                        "characterTemplateIds":  [
+                                                     1011
+                                                 ],
+                        "sourceSha256":  "772448a36c705ed625d1a5dad59aef5066f1f7f4f0acbc85a561284b51fc494b",
+                        "sanitizedSha256":  "1cb520ebe8a884af09718d5447c292b59e7ba6fd692ed657a7699b1694ff6ec5",
+                        "sanitizedCharacters":  975,
+                        "removedSections":  1,
+                        "removedLines":  7
+                    },
+                    {
+                        "key":  "assistant-linger",
+                        "displayName":  "灵儿",
+                        "sourceFile":  "灵儿角色卡.txt",
+                        "resourceFile":  "persona-assistant-linger.txt",
+                        "role":  "assistant",
+                        "characterTemplateIds":  [
+
+                                                 ],
+                        "sourceSha256":  "b50e5f813bb90060b50a78ce6640e692a56197ce98fcfae0e3dfd26a87cd29ad",
+                        "sanitizedSha256":  "4381de131d8b209a4c6d348c2d17190ac991f75814941082472a0fa728319939",
+                        "sanitizedCharacters":  2111,
+                        "removedSections":  1,
+                        "removedLines":  12
+                    },
+                    {
+                        "key":  "pangu-unmapped",
+                        "displayName":  "盘古",
+                        "sourceFile":  "盘古角色卡.txt",
+                        "resourceFile":  "persona-unmapped-pangu.txt",
+                        "role":  "unmapped-event-actor",
+                        "characterTemplateIds":  [
+
+                                                 ],
+                        "sourceSha256":  "43ff82e3603401241d1af59c1d0fb94421b94699acb605dc9e9fbbcc1fd059eb",
+                        "sanitizedSha256":  "532194837b44979a1e4694a3ab924d2a627c1f2cb154d9daf820d4d9b9425d94",
+                        "sanitizedCharacters":  2283,
+                        "removedSections":  0,
+                        "removedLines":  4
+                    },
+                    {
+                        "key":  "nuwa-unmapped",
+                        "displayName":  "女娲",
+                        "sourceFile":  "女娲角色卡.txt",
+                        "resourceFile":  "persona-unmapped-nuwa.txt",
+                        "role":  "unmapped-event-actor",
+                        "characterTemplateIds":  [
+
+                                                 ],
+                        "sourceSha256":  "975ec441a41bd3e851487c1243a6c6bcd8b693bd72313e04e02580eaee213dcc",
+                        "sanitizedSha256":  "5e5fd05f78ba50b2d4f39e1913d1f35e35646954827ae3ada41dd98e5e2d5e6a",
+                        "sanitizedCharacters":  2293,
+                        "removedSections":  0,
+                        "removedLines":  3
+                    }
+                ],
+    "worldBook":  {
+                      "sourceFile":  "太吾绘卷世界书.txt",
+                      "resourceFile":  "default-worldbook.txt",
+                      "sourceSha256":  "694abbeee69729ea11c3b10b2e63258120b95df1e470e88f6d964e56583c7c4d",
+                      "transform":  "faction-skill-correction-and-agent-safety-2026-07-29",
+                      "sanitizedSha256":  "511fe725fc69a0bb948165fd7ecbe382dbf63fc8a090db9553c0ed817c69bedf",
+                      "sanitizedCharacters":  15205,
+                      "removedSections":  0,
+                      "removedLines":  0
+                  },
+    "unmapped":  [
+                     {
+                         "displayName":  "盘古",
+                         "sourceFile":  "盘古角色卡.txt",
+                         "reason":  "Only EventActors id 329 is known; it is not a Config.Character.TemplateId and must not cross namespaces."
+                     },
+                     {
+                         "displayName":  "女娲",
+                         "sourceFile":  "女娲角色卡.txt",
+                         "reason":  "Only EventActors ids 333/334 are known; they are not Config.Character.TemplateId values and must not cross namespaces."
+                     }
+                 ]
+}
