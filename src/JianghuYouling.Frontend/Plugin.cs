@@ -8,7 +8,7 @@ namespace JianghuYouling
     /// 《江湖有灵》前端插件入口。NPC 由 AI 扮演，一切影响皆其真实反应。
     /// 见 docs/specs/2026-06-18-quantan-design.md
     /// </summary>
-    [PluginConfig("JianghuYouling", "jianghuyouling", "0.34.0.24")]
+    [PluginConfig("JianghuYouling", "jianghuyouling", "0.34.0.25")]
     public class Plugin : TaiwuRemakePlugin
     {
         public static Plugin Instance { get; private set; }
@@ -32,7 +32,7 @@ namespace JianghuYouling
             MonthlySettlement.Initialize();  // 过月车道:行为意图 → 引擎目标
             LoadSettingsFromStores();   // 配置一律读 mod 内设置窗存盘(难度/篇幅/流式);mod 管理页不再有任何设置项
             Debug.Log("[江湖有灵] Initialized: " + GetGuid()
-                + " mod=0.34.0.24 targetGame=1.1.21 targetBuild=25596993");
+                + " mod=0.34.0.25 targetGame=1.1.21 targetBuild=25596993");
         }
 
         public override void Dispose()

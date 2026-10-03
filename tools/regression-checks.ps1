@@ -2592,9 +2592,9 @@ Assert-Contains 'Assistant only retries classified transient service failures' $
 Assert-Contains 'Assistant proactive messages use a compact persona' $assistantOrchestrator 'public static string ProactivePersona()'
 Assert-Contains 'Assistant proactive persona bounds custom persona context' $assistantOrchestrator 'custom.Length > 1200'
 Assert-Contains 'Assistant knowledge base has maintenance reminder' $assistantOrchestrator 'JHYL_ASSISTANT_KB_SYNC'
-Assert-Contains 'Assistant knowledge base has current mod/Taiwu version marker' $assistantOrchestrator 'JHYL_ASSISTANT_KB_VERSION:mod=0.34.0.24,taiwu=1.1.21,buildid=25596993'
+Assert-Contains 'Assistant knowledge base has current mod/Taiwu version marker' $assistantOrchestrator 'JHYL_ASSISTANT_KB_VERSION:mod=0.34.0.25,taiwu=1.1.21,buildid=25596993'
 Assert-Contains 'Assistant knowledge base identifies the shared release baseline' $assistantOrchestrator '测试版与正式版使用同一功能版本'
-Assert-Contains 'Assistant knowledge base describes the latest charm context update' $assistantOrchestrator '最近更新（0.34.0.24）：人物默认上下文加入 NPC 与太吾各自的实时魅力值'
+Assert-Contains 'Assistant knowledge base describes the latest notification isolation update' $assistantOrchestrator '最近更新（0.34.0.25）：隔离前端通知监听器异常'
 Assert-Contains 'Assistant knowledge base knows same-sex spend night is supported' $assistantOrchestrator 'JHYL_ASSISTANT_KB_SPEND_NIGHT_SAME_SEX'
 Assert-Contains 'Assistant knowledge base knows worldbook cannot disable tools' $assistantOrchestrator 'JHYL_ASSISTANT_KB_WORLD_BOOK_TOOL_GUARD'
 Assert-Contains 'Assistant knowledge base knows persona/worldbook mode semantics' $assistantOrchestrator 'JHYL_ASSISTANT_KB_PERSONA_WORLD_BOOK_MODES'
@@ -2734,7 +2734,7 @@ $frontendProj = Read-Source 'src/JianghuYouling.Frontend/JianghuYouling.Frontend
 Assert-Contains 'Frontend references Unity image conversion module for png jpg loading' $frontendProj 'UnityEngine.ImageConversionModule'
 
 $frontendPlugin = Read-Source 'src/JianghuYouling.Frontend/Plugin.cs'
-Assert-Contains 'Frontend PluginConfig version is 0.34' $frontendPlugin 'PluginConfig("JianghuYouling", "jianghuyouling", "0.34.0.24")'
+Assert-Contains 'Frontend PluginConfig version is 0.34' $frontendPlugin 'PluginConfig("JianghuYouling", "jianghuyouling", "0.34.0.25")'
 Assert-Contains 'Frontend startup log records authoritative target game version' $frontendPlugin 'targetGame=1.1.21 targetBuild=25596993'
 
 $worldLifecycle = Read-Source 'src/JianghuYouling.Frontend/Game/WorldLifecycle.cs'
@@ -3888,7 +3888,7 @@ Assert-Before 'Capture records Taiwu-party disappearance before kidnapping' $bac
 Assert-Before 'Capture writes private life records after authoritative kidnapping' $backend 'DomainManager.Character.AddKidnappedCharacter(context, npcId, targetId, ropeKey);' 'lifeRecords.AddKidnapInPrivate(npcId, currDate, targetId, location'
 Assert-Before 'Capture writes private secret after private life records' $backend 'lifeRecords.AddKidnapInPrivate(npcId, currDate, targetId, location' 'secrets.AddKidnapInPrivate(npcId, targetId);'
 Assert-Contains 'GM mutation outer exceptions are indeterminate' $backend 'gm_mutation_indeterminate'
-Assert-Contains 'Backend PluginConfig version is 0.34' $backend 'PluginConfig("江湖有灵 Backend", "jianghuyouling", "0.34.0.24")'
+Assert-Contains 'Backend PluginConfig version is 0.34' $backend 'PluginConfig("江湖有灵 Backend", "jianghuyouling", "0.34.0.25")'
 Assert-Contains 'Backend item lookup has query aliases' $backend 'ItemQueryAliases'
 Assert-Contains 'Backend item lookup strips natural-language query noise' $backend 'StripItemQueryNoise'
 $itemNameMatcher = Read-Source 'src/Shared/ItemNameMatcher.cs'
@@ -3948,7 +3948,7 @@ Assert-Contains 'Companion monthly dispatches spend-night with the actual actor 
 Assert-Contains 'Monthly events dispatch spend-night with the actual actor and target' $monthlyEvent 'ApplySpendNightBetween(aid, bid, taiwuId'
 
 $configLua = Read-Source 'deploy/Config.lua'
-Assert-Contains 'Config.lua version is 0.34' $configLua 'Version = "0.34.0.24"'
+Assert-Contains 'Config.lua version is 0.34' $configLua 'Version = "0.34.0.25"'
 Assert-Contains 'Config.lua targets the currently audited game version' $configLua 'GameVersion = "1.1.21"'
 Assert-Contains 'Config.lua release heading is current 0.34 version' $configLua '【0.34 当前版本重点】'
 Assert-Contains 'Config.lua release notes mention log analyzer' $configLua '灵儿可直接分析 Player.log'
@@ -4060,9 +4060,9 @@ Assert-NotContains 'Workshop description removes supporter feature voting' $work
 Assert-Contains 'Workshop description ends with the in-game settings entry point' $workshopDescription '设置在游戏内，点击灵儿头像。'
 $workshopDescriptionTest = Read-Source 'docs/workshop-description-test.bbcode.txt'
 $workshopDescriptionFormal = Read-Source 'docs/workshop-description-formal.bbcode.txt'
-Assert-Contains 'Markdown Workshop description carries the current version marker' $workshopDescription '【当前版本】0.34.0.24'
-Assert-Contains 'Test Workshop description carries the current version marker' $workshopDescriptionTest '【当前版本】0.34.0.24'
-Assert-Contains 'Formal Workshop description carries the current version marker' $workshopDescriptionFormal '【当前版本】0.34.0.24'
+Assert-Contains 'Markdown Workshop description carries the current version marker' $workshopDescription '【当前版本】0.34.0.25'
+Assert-Contains 'Test Workshop description carries the current version marker' $workshopDescriptionTest '【当前版本】0.34.0.25'
+Assert-Contains 'Formal Workshop description carries the current version marker' $workshopDescriptionFormal '【当前版本】0.34.0.25'
 if ($workshopDescriptionTest -cne $workshopDescriptionFormal) {
     $failures.Add('Test and formal Workshop descriptions must remain byte-identical')
 }
