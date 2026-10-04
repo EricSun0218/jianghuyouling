@@ -148,10 +148,16 @@ namespace JianghuYouling.BackendContractTests
                 })
                     RequireContains(physicalPairs, "case \"" + physicalOp + "\":",
                         physicalOp + " is covered by the shared live-location gate");
-                RequireContains(killMutation, "if (!SameValidLocation(npc, target))",
-                    "kill revalidates live co-location in its dedicated backend endpoint");
-                RequireContains(captureMutation, "if (!SameValidLocation(npc, target))",
-                    "capture revalidates live co-location in its dedicated backend endpoint");
+                RequireContains(killMutation, "MonthlyDangerActionPolicy.RequiresCoLocation(\"kill\", monthlyOnlyPurity)",
+                    "kill preserves the whole-month exception without weakening ordinary dialogue distance checks");
+                RequireContains(killMutation, "&& !SameValidLocation(npc, target)",
+                    "ordinary kill still revalidates live co-location");
+                RequireContains(captureMutation, "MonthlyDangerActionPolicy.RequiresCoLocation(\"capture\", monthlyOnlyPurity)",
+                    "capture preserves the whole-month exception without weakening ordinary dialogue distance checks");
+                RequireContains(captureMutation, "&& !SameValidLocation(npc, target)",
+                    "ordinary capture still revalidates live co-location");
+                RequireContains(physicalPairs, "MonthlyDangerActionPolicy.RequiresCoLocation(op, monthlyOnlyPurity)",
+                    "whole-month poison is not rejected by the ordinary physical pair gate");
                 RequireContains(backend, "result.Set(\"same_valid_location\", sameValidLocation);",
                     "monthly preflight returns the authoritative live co-location verdict");
                 RequireContains(effects, "resp.Get(\"same_valid_location\", out value.SameValidLocation);",
@@ -504,6 +510,10 @@ namespace JianghuYouling.BackendContractTests
                 RequireContains(workshopUpdateChecker,
                     "if (TryReadLoadedModIdentity(out version, out fileId, out source)) return true;",
                     "workshop update checks prefer the already validated loaded mod identity");
+                RequireContains(workshopUpdateChecker, "Plugin.Instance?.ModIdStr",
+                    "workshop lookup uses the loader-bound installation instead of an inferred title");
+                RequireContains(workshopUpdateChecker, "Plugin.Instance?.PluginVersion",
+                    "workshop comparison identifies the running assembly version");
                 RequireContains(workshopUpdateChecker,
                     "JianghuYouling.Frontend.dll",
                     "local mods with native temporary ids are identified by their loaded frontend plugin");
@@ -1750,6 +1760,19 @@ namespace JianghuYouling.BackendContractTests
                     "write-book preserves unknown classification when compensation cannot be proven");
                 string actorSceneQuery = Slice(backend,
                     "case \"actor_block_chars\":", "case \"char_location\":");
+                RequireContains(actorSceneQuery, "GetPhysicalSceneLocation(actor)",
+                    "monthly candidate preload uses the actual party/carrier scene");
+                string physicalLocations = Slice(backend,
+                    "private static Location GetPhysicalSceneLocation(",
+                    "private static bool TryGetPhysicalInteractionPair(");
+                RequireContains(physicalLocations, "CharacterSceneAnchorResolver.TryResolve",
+                    "physical location uses the cycle-checked production resolver");
+                RequireContains(physicalLocations, "IsSpecialGroupMember(current)",
+                    "special followers require native membership before following the leader location");
+                RequireContains(physicalLocations, "GetGroup(leader).Contains(id)",
+                    "regular followers require native membership rather than a leftover leader field");
+                RequireContains(physicalLocations, "GetPhysicalSceneLocation(target)",
+                    "the final physical action check shares the preflight location authority");
                 RequireContains(actorSceneQuery,
                     "DomainManager.Character.GetKidnappedCharacters(actorId).GetCollection()",
                     "actor-scene query includes captives carried outside MapBlockData");

@@ -1147,6 +1147,13 @@ namespace JianghuYouling.DevTest
                 || !companion.Contains("CommitCompanionActorOutcomeMemory"))
                 throw new InvalidOperationException(
                     "过月 Agent 仍承担正文生成，或真实工具结果没有自动进入人物记忆");
+            if (!companionLoop.Contains("roundHasSuccessfulActionReceipt, roundHasNewAuthoritativeFacts")
+                || !loop.Contains("roundHasSuccessfulActionReceipt, roundHasNewAuthoritativeFacts")
+                || !loop.Contains("!queryCacheHit && queryResult != null && queryResult.Reliable")
+                || !companionLoop.Contains("queryResultCache.TryGetValue(canonicalKey")
+                || !companionLoop.Contains("不能返回空消息")
+                || !loop.Contains("不能返回空消息"))
+                throw new InvalidOperationException("过月新事实被错误计为空转，或结束提示仍要求空消息");
         }
 
         private static void RequireDefinitionsAndCases(string label, string definitions, string executor,

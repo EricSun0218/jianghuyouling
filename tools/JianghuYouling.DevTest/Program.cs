@@ -7906,6 +7906,16 @@ namespace JianghuYouling.DevTest
                 "【本次新增】\n- 第999月与「无证据之人」结为夫妻。", appendProfile, null, null,
                 appendMemories, out appendLayer, out appendReason);
             AssertEq("自动追加仍拒绝无证据事件与强关系", ungroundedRejected.ToString(), "True");
+            var appendRepairMessages = PortraitDistiller.BuildCustomAppendRepairMessages(
+                firstAppendLayer, appendProfile, null, null, appendMemories);
+            AssertEq("增量纠正保留原始证据并明确只准一次",
+                (appendRepairMessages.Last().Content.Contains("唯一一次")
+                    && appendRepairMessages.Last().Content.Contains(PortraitDistiller.NoCustomPersonaAppendToken)
+                    && appendRepairMessages.Exists(m => m.Content != null
+                        && m.Content.Contains("案卷同盟"))).ToString(), "True");
+            AssertEq("增量纠正不把玩家人设提升成系统消息",
+                appendRepairMessages.Where(m => m.Role == "system")
+                    .Any(m => (m.Content ?? "").Contains("他固定以‘守约人’自居")).ToString(), "False");
 
             var wb = WorldBookFilter.Resolve("常驻设定\n＠＠剑冢\n触发设定\n＠＠结束\n!临场铁令", "谈及剑冢");
             AssertEq("世界书全角块常驻分离", wb.StableBackground.Contains("常驻设定").ToString(), "True");
@@ -9511,6 +9521,68 @@ namespace JianghuYouling.DevTest
                 preMinimumFuse.ObserveRound(false, true).ToString(), "False");
             AssertEq("未达标空转计数已清零",
                 preMinimumFuse.ConsecutiveNonProgressRounds.ToString(), "0");
+
+            for (int i = 0; i < 4; i++)
+                AssertEq("不同人物权威查询不误触三轮空转熔断 " + i,
+                    preMinimumFuse.ObserveRound(false, false, true).ToString(), "False");
+            AssertEq("查询新事实不充当实际行动", new MonthlyAgentCompletionState(3, 2)
+                .ActionCount.ToString(), "0");
+            AssertEq("查人后动作失败仍有纠偏机会",
+                preMinimumFuse.ObserveRound(false, false).ToString(), "False");
+            AssertEq("受阻后换对象查到新事实会重置熔断",
+                preMinimumFuse.ObserveRound(false, false, true).ToString(), "False");
+            AssertEq("重复缓存查询第一轮不冒充进展",
+                preMinimumFuse.ObserveRound(false, false, false).ToString(), "False");
+            AssertEq("重复缓存查询第二轮仍保留纠偏",
+                preMinimumFuse.ObserveRound(false, false, false).ToString(), "False");
+            AssertEq("重复缓存查询第三轮正常熔断",
+                preMinimumFuse.ObserveRound(false, false, false).ToString(), "True");
+            AssertEq("最低线后读取新事实仍能继续因果链",
+                progressFuse.ObserveToolRound(true, false, true).ToString(), "False");
+            foreach (string operation in new[] { "kill", "capture", "poison" })
+            {
+                AssertEq("普通对话危险行动仍须同地块 " + operation,
+                    MonthlyDangerActionPolicy.RequiresCoLocation(operation, 0).ToString(), "True");
+                AssertEq("过月寻人危险行动不误走当面距离闸 " + operation,
+                    MonthlyDangerActionPolicy.RequiresCoLocation(operation, 1).ToString(), "False");
+                AssertEq("异常过月标记不能绕过距离 " + operation,
+                    MonthlyDangerActionPolicy.RequiresCoLocation(operation, 2).ToString(), "True");
+            }
+            AssertEq("过月标记不允许异地赠物",
+                MonthlyDangerActionPolicy.RequiresCoLocation("giveitem", 1).ToString(), "True");
+
+            var sceneAnchors = new Dictionary<int, int?>
+            {
+                [10] = 10, [11] = 10, [12] = 11, [20] = 20,
+                [30] = 31, [31] = 30, [40] = 41,
+            };
+            int? ReadAnchor(int id) => sceneAnchors.TryGetValue(id, out int? anchor) ? anchor : null;
+            AssertEq("有队友的队长仍以自身地块为现场",
+                CharacterSceneAnchorResolver.TryResolve(10, ReadAnchor, out int leaderAnchor).ToString(), "True");
+            AssertEq("队长不被其队友反向绑住", leaderAnchor.ToString(), "10");
+            AssertEq("特殊随从随当前队长确定现场",
+                CharacterSceneAnchorResolver.TryResolve(11, ReadAnchor, out int followerAnchor).ToString(), "True");
+            AssertEq("随从现场为队长", followerAnchor.ToString(), "10");
+            AssertEq("队友携带的人物沿权威关系找到现场",
+                CharacterSceneAnchorResolver.TryResolve(12, ReadAnchor, out int captiveAnchor).ToString(), "True");
+            AssertEq("携带人物不会被无效自身坐标判为异地", captiveAnchor.ToString(), "10");
+            AssertEq("异地无关人物保留自己的现场",
+                CharacterSceneAnchorResolver.TryResolve(20, ReadAnchor, out int remoteAnchor).ToString(), "True");
+            AssertEq("无关人物不自动并入队伍", remoteAnchor.ToString(), "20");
+            AssertEq("循环队伍关系失败关闭",
+                CharacterSceneAnchorResolver.TryResolve(30, ReadAnchor, out _).ToString(), "False");
+            AssertEq("携带者已失效时不复用旧现场",
+                CharacterSceneAnchorResolver.TryResolve(40, ReadAnchor, out _).ToString(), "False");
+            AssertEq("无法查询权威队伍时失败关闭",
+                CharacterSceneAnchorResolver.TryResolve(10, _ => throw new InvalidOperationException(), out _).ToString(), "False");
+            AssertEq("名单中带性别地点的完整引用可解析",
+                JianghuYouling.Core.Text.CharacterReferenceParser.ParseId("测试人物(#42,女,同地块)").ToString(), "42");
+            AssertEq("中文括号人物编号可解析",
+                JianghuYouling.Core.Text.CharacterReferenceParser.ParseId("测试人物（#42，男）").ToString(), "42");
+            AssertEq("多个角色编号不能混解析",
+                JianghuYouling.Core.Text.CharacterReferenceParser.ParseId("测试人物(#42,#43)").ToString(), "0");
+            AssertEq("溢出角色编号失败关闭",
+                JianghuYouling.Core.Text.CharacterReferenceParser.ParseId("#99999999999999").ToString(), "0");
 
             var blocked = new MonthlyAgentCompletionState(3, 2);
             AssertEq("第一项被全部硬前置阻断时允许 no_action 直接进入正文",

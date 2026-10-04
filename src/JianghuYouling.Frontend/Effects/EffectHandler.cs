@@ -405,8 +405,14 @@ namespace JianghuYouling.Effects
                         resp?.Get(RpcConst.OperationIdField, out operationId);
                         msg = OutcomeMessage(resp, msg);
                         if (resp != null && msg != null) resp.Set("message", msg);
-                        if (!ok) Debug.LogWarning("[江湖有灵] GM " + op + " 失败: status=" + (status ?? "")
-                            + " code=" + (code ?? "") + " op=" + (operationId ?? "") + " " + (msg ?? ""));
+                        if (!ok)
+                        {
+                            string diagnostic = "[江湖有灵] GM " + op + " 失败: status=" + (status ?? "")
+                                + " code=" + (code ?? "") + " op=" + (operationId ?? "") + " " + (msg ?? "");
+                            if (!journaled && code == "native_month_advance_read_suppressed")
+                                Debug.Log(diagnostic);
+                            else Debug.LogWarning(diagnostic);
+                        }
                     }
                     catch { }
                     PublishOperationOutcome(resp, stableOperationId);
@@ -1276,6 +1282,9 @@ namespace JianghuYouling.Effects
                     bool ok = false; int area = -1, block = -1;
                     resp?.Get("success", out ok);
                     if (ok) { resp?.Get("area", out area); resp?.Get("block", out block); }
+                    bool locationValid = false;
+                    resp?.Get("location_valid", out locationValid);
+                    ok = ok && locationValid && area >= 0 && block >= 0;
                     onResult?.Invoke((short)area, (short)block, ok);
                 });
         }

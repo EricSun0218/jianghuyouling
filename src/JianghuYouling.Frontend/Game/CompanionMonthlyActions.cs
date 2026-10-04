@@ -1169,8 +1169,16 @@ namespace JianghuYouling
                 yield return PrepareActorLocalScene(scene, npcId, current, ok => actorSceneReady = ok);
                 heartbeat?.Invoke();
             }
-            if (!actorSceneReady || !current()) { onDone(null); yield break; }
+            if (!actorSceneReady || !current())
+            {
+                if (current()) Debug.LogWarning("[JHYL_COMPANION_MONTHLY_SKIP] npc=" + npcId
+                    + " reason=actor_scene_unavailable");
+                onDone(null); yield break;
+            }
             result.Name = string.IsNullOrWhiteSpace(snap.Name) ? ("#" + npcId) : snap.Name;
+            // The backend scene already resolved followers/carried characters. Do not
+            // reintroduce a stale DisplayData location into the model or durable receipt.
+            snap.LocationText = FormatLiveLocation(scene.AreaId, scene.BlockId);
             result.LocationText = string.IsNullOrWhiteSpace(snap.LocationText)
                 ? "去向不明（游戏当前未提供有效地点）" : snap.LocationText.Trim();
             PopulateAuthorizedParticipants(result.AuthorizedParticipantIds, snap, scene);
@@ -1227,7 +1235,7 @@ namespace JianghuYouling
                 + "本月至少完成三项得到成功回执的实质行为，并且分属至少两种行为类型。赠物、交换、写书、亲授都属于同一“物资与传承”类型：因果需要时这些动作仍可连续执行，但该类型无论做几次都只计一种，不能单靠它们凑足两类。"
                 + "本月不设工具动作次数额度；三项、两类只是禁止提前收尾的最低线，达到它绝不代表最初目标已经完成。未达标时要继续补足；达标后只要承诺、冲突、追寻或其它因果仍悬着，仍须继续紧密相关的行动，直到自然落定或被真实条件明确阻断。只有第一项都无法落地、且所有硬前置确实挡住任何行动时才可调用 no_action。"
                 + "所有真实工具结果都会由代码自动写入长期记忆，不需要调用 remember。"
-                + "当原始动因已经自然落定或被权威回执明确阻断时，直接停止调用工具。无需生成正文；"
+                + "当原始动因已经自然落定或被权威回执明确阻断时，直接停止调用工具，只回复‘本轮结束’，不能返回空消息。无需生成叙事正文；"
                 + "玩家只看代码汇总的真实工具回执，长期记忆也只记录这些回执。\n\n"
                 + monthlySkills + "\n\n" + actionNoveltyHint
                 + "\n\n工具名称、参数与用途以本轮随请求提供的真实工具定义为准，不在提示正文中重复抄写。"));
@@ -1369,7 +1377,7 @@ namespace JianghuYouling
                         {
                             Debug.LogWarning("[JHYL_COMPANION_PRE_MINIMUM_FUSE] npc=" + npcId
                                 + " round=" + (round + 1)
-                                + " reason=three_rounds_without_real_action");
+                                + " reason=three_rounds_without_action_or_new_facts");
                             finalNarrative = DeterministicStory(result, null);
                             break;
                         }
@@ -1377,7 +1385,7 @@ namespace JianghuYouling
                         messages.Add(LlmMessage.System(
                             "你尚未调用任何真实工具。本月与太吾实际相处过，必须先行动；只有硬前置全部阻断时才调用 no_action。"
                             + (preMinimumProgressFuse.ConsecutiveNonProgressRounds >= 2
-                                ? " 已连续两轮没有新增真实行动；下一轮必须直接选择可落地行动，或在确实无事可做时调用 no_action，禁止继续查询或空写。"
+                                ? " 已连续两轮没有新增真实行动或权威事实；下一轮应选择可落地行动，或在确实无事可做时调用 no_action，不要重复查询或空写。"
                                 : "")));
                         // 统一保持 auto 和完整思考；是否真正行动由下一轮本地回执门继续检查。
                         continue;
@@ -1391,7 +1399,7 @@ namespace JianghuYouling
                             Debug.LogWarning("[JHYL_COMPANION_PRE_MINIMUM_FUSE] npc=" + npcId
                                 + " round=" + (round + 1) + " confirmed="
                                 + confirmedActionCount
-                                + " reason=three_rounds_without_real_action");
+                                + " reason=three_rounds_without_action_or_new_facts");
                             finalNarrative = DeterministicStory(result, null);
                             break;
                         }
@@ -1399,7 +1407,7 @@ namespace JianghuYouling
                         messages.Add(LlmMessage.System(BuildCompanionDiversityCorrection(
                             confirmedActionCount, confirmedActionCategories)
                             + (preMinimumProgressFuse.ConsecutiveNonProgressRounds >= 2
-                                ? " 已连续两轮没有新增真实行动；下一轮必须直接执行可落地行为，若真实条件已阻断则停止，禁止继续查询或空写。"
+                                ? " 已连续两轮没有新增真实行动或权威事实；下一轮应直接执行可落地行为，若真实条件已阻断则停止，不要重复查询或空写。"
                                 : "")));
                         continue;
                     }
@@ -1409,7 +1417,7 @@ namespace JianghuYouling
                         messages.Add(LlmMessage.System(
                             "三项、两类只是最低线，不是完成条件。现在重新对照最初动因、未决承诺、冲突与追寻："
                             + "只有存在一项具体未决因果时，才继续调用紧密相关的查询或行动；没有动作次数上限。"
-                            + "若最初动因已经自然落定，或被权威回执明确阻断，就停止调用工具；无需再写正文。"
+                            + "若最初动因已经自然落定，或被权威回执明确阻断，就停止调用工具，只回复‘本轮结束’，不能返回空消息；无需再写叙事正文。"
                             + "禁止仅为丰富度、凑热闹或继续扩写而追加无关动作。"
                             + "不要汇报数量、门槛或这次检查。"));
                         continue;
@@ -1425,6 +1433,7 @@ namespace JianghuYouling
                 messages.Add(LlmMessage.WithToolCalls(turn.ToolCalls, turn.Content,
                     turn.ReplayReasoningContent));
                 bool roundHasSuccessfulActionReceipt = false;
+                bool roundHasNewAuthoritativeFacts = false;
                 // 同轮可处理多个互不依赖的只读查询；状态变更只能落地一个，且不能紧跟
                 // 在同轮查询之后，因为模型尚未读到查询回执。
                 bool mutationDecisionConsumedThisRound = false;
@@ -1580,6 +1589,7 @@ namespace JianghuYouling
                     if (readOnlyQuery && ToolResultSucceeded(toolResult))
                     {
                         queryResultCache[canonicalKey] = toolResult ?? "查询没有返回可靠结果";
+                        roundHasNewAuthoritativeFacts = true;
                     }
                     if (!notExecuted && !readOnlyQuery) attemptedKeys.Add(canonicalKey);
                     anyAttempt = anyAttempt || call.Name != "no_action" && !readOnlyQuery && !notExecuted;
@@ -1649,30 +1659,30 @@ namespace JianghuYouling
                         + (ToolResultSucceeded(toolResult)
                             ? (MinimumCompanionActionDiversityMet(confirmedActionCount,
                                     confirmedActionCategories)
-                                ? "\n本月只达到了三项、两类最低线，这不代表最初目标已经完成，也不形成动作上限。请对照最初动因：若已自然落定或被权威条件阻断，就停止调用工具；只有存在具体未决因果才继续紧密相关的下一步，禁止仅为丰富度追加无关动作。无需生成正文。"
+                                ? "\n本月只达到了三项、两类最低线，这不代表最初目标已经完成，也不形成动作上限。请对照最初动因：若已自然落定或被权威条件阻断，就停止调用工具，只回复‘本轮结束’，不能返回空消息；只有存在具体未决因果才继续紧密相关的下一步，禁止仅为丰富度追加无关动作。无需生成叙事正文。"
                                 : "\n" + BuildCompanionDiversityCorrection(confirmedActionCount,
                                     confirmedActionCategories))
                             : "\n这是明确失败原因，请换可行做法；不得假称成功。")));
                     if (noActionChosen) remembered = true;
                 }
                 if (preMinimumProgressFuse.ObserveRound(completionState.MinimumSatisfied,
-                    roundHasSuccessfulActionReceipt))
+                    roundHasSuccessfulActionReceipt, roundHasNewAuthoritativeFacts))
                 {
                     Debug.LogWarning("[JHYL_COMPANION_PRE_MINIMUM_FUSE] npc=" + npcId
                         + " round=" + (round + 1) + " confirmed=" + confirmedActionCount
-                        + " reason=three_rounds_without_real_action");
+                        + " reason=three_rounds_without_action_or_new_facts");
                     finalNarrative = DeterministicStory(result, null);
                     break;
                 }
                 if (postMinimumProgressFuse.ObserveToolRound(
-                    completionState.MinimumSatisfied, roundHasSuccessfulActionReceipt))
+                    completionState.MinimumSatisfied, roundHasSuccessfulActionReceipt,
+                    roundHasNewAuthoritativeFacts))
                 {
                     // This is a progress fuse, not an action quota.  Any additional successful
-                    // action resets it, so a causally productive chain may remain arbitrarily
-                    // rich. Two post-minimum rounds containing only queries or rejected/no-op
-                    // calls indicate exploration has stalled.
+                    // action or newly hydrated prerequisite resets it. Repeated cached queries,
+                    // rejected calls and no-ops do not count as progress.
                     Debug.Log("[JHYL_COMPANION_PROGRESS_FUSE] npc=" + npcId
-                        + " reason=two_post_minimum_rounds_without_success");
+                        + " reason=two_post_minimum_rounds_without_action_or_new_facts");
                     finalNarrative = DeterministicStory(result, null);
                     break;
                 }
@@ -4348,7 +4358,7 @@ namespace JianghuYouling
             sb.Append("JHYL_COMPANION_MONTHLY_COMBO_ACTIONS: 围绕同一个核心动因连续做至少三步因果链，并覆盖至少两种类型;每一步都要先看上一工具的真实结果。动作要有关联；同类后续可以真实发生，只是不增加类型数，最终还要形成至少两类。");
             sb.Append("每次读完真实结果，都回到最初动因判断并检查三项两类进度：未达标就继续挑选仍与动因紧密相关的下一步，并最终补足另一类；达到只代表越过最低线，不代表完成，也不形成动作上限。达到后若最初动因已经自然落定或被权威结果明确阻断，就停止调用工具；只有存在具体未决因果才继续紧密相关的下一步，禁止仅为丰富度追加无关动作。");
             sb.Append("本月每项真实工具结果都由代码自动写入长期记忆；不要额外概括或调用记忆工具。");
-            sb.Append("不要为了热闹做不合人设的事，也不要连续数月只传一句话、写一本书、送一件小物或传一门功法来敷衍。优先承接未了的爱憎、承诺、欲望与危机，让三项跨类型行为形成前因、行动与余波，真正改变自己或另一人的处境。工具做完后由你自己停止调用工具，无需生成叙事正文。");
+            sb.Append("不要为了热闹做不合人设的事，也不要连续数月只传一句话、写一本书、送一件小物或传一门功法来敷衍。优先承接未了的爱憎、承诺、欲望与危机，让三项跨类型行为形成前因、行动与余波，真正改变自己或另一人的处境。工具做完后由你自己停止调用工具，只回复‘本轮结束’，不能返回空消息，无需生成叙事正文。");
             sb.Append("你必须把【人物与距离】当作当前感知边界：在场人物可做符合前置的当面行为；异地人物通常只能千里传音及进行言语能够成立的交流、关系或态度行为。过月 kill/capture/poison 是明确例外，代表行动者在整月中自行寻至目标后实施，代码只校验精纯，不要因异地而禁用。可用完整姓名联系未列出的任意人物，代码只接受全局唯一严格全名。绝不能把群聊成员、旧识或记忆里的人仅因被提及就误认作在场。进入游戏本体战斗只属于当面单聊，本过月规划器不提供发起战斗。");
             sb.Append("kill/capture/poison 必须有符合人物与本月因果的具体动机；仇怨只是可能之一，也可源于利益、灭口、保护、受命、野心或冲突升级。不要随机伤人，但也不要把没有仇敌关系误当成禁止。过月这三项的玩法硬门槛只有行动者精纯不低于目标；代码仍会拒绝无效、已死亡、自身等不可能目标。");
             sb.Append("不得因为偷窃、下毒、擒拿、杀人属于负面或危险行为就统一降低选择概率、设置冷却或限制每月次数；具体动机成立时，不寻常的行动应当和安全行动一样直接进入选择。");
@@ -5148,8 +5158,14 @@ namespace JianghuYouling
                             + "；可颠倒=" + ListFlippableSkills(snap));
                         yield break;
                     }
-                    if (target <= 0 || target == snap.NpcId)
-                    { onResult("未执行：关系查询对象必须是可唯一识别的另一名人物"); yield break; }
+                    if (target <= 0)
+                    {
+                        onResult("未执行：" + (label ?? "无法可靠识别查询对象")
+                            + "。请使用在场名单或关系网中的完整姓名或 #角色ID，不要用称呼、姓名加注释或多人合写。");
+                        yield break;
+                    }
+                    if (target == snap.NpcId)
+                    { onResult("未执行：不能查询自己与自己的关系；查询本人资料请调用 query_person(name=自己)"); yield break; }
                     if (target == snap.TaiwuId)
                     {
                         string taiwuFact = RenderAffinityToTaiwu(snap);
@@ -5970,7 +5986,11 @@ namespace JianghuYouling
                         if (alreadyKnown)
                         {
                             onResult("未执行：" + (label ?? ("#" + target)) + "已经通晓「" + skill.Name
-                                + "」。请从 query_person 回执中排除对方已会内容后换另一门，或改做别的事；本步没有发生。");
+                                + "」。本步没有发生。当前可亲授给此人的武学="
+                                + ListUnlearnedRelevantSkills(snap.LearnableSkills, recipientSkills.LearnableSkills)
+                                + "；技艺=" + ListUnlearnedRelevantSkills(snap.LearnableLifeSkills,
+                                    recipientSkills.LearnableLifeSkills)
+                                + "。只能选择上述未学候选；均为无时必须换对象或改做别的事，不要轮流试授已会内容。");
                             yield break;
                         }
                     }
@@ -6718,18 +6738,7 @@ namespace JianghuYouling
         }
 
         private static int ParseCompanionSceneId(string raw)
-        {
-            if (string.IsNullOrWhiteSpace(raw)) return 0;
-            string text = raw.Trim();
-            int id;
-            if (text[0] == '#' && int.TryParse(text.Substring(1), out id) && id > 0) return id;
-            if (int.TryParse(text, out id) && id > 0) return id;
-            int marker = text.LastIndexOf("(#", StringComparison.Ordinal);
-            if (marker >= 0 && text.EndsWith(")", StringComparison.Ordinal)
-                && int.TryParse(text.Substring(marker + 2, text.Length - marker - 3), out id) && id > 0)
-                return id;
-            return 0;
-        }
+            => JianghuYouling.Core.Text.CharacterReferenceParser.ParseId(raw);
 
         private static IEnumerator WaitRpc(Func<bool> done, MutationLease lease)
         {
@@ -7888,6 +7897,25 @@ namespace JianghuYouling
                 names.Add(skill.Name);
                 if (names.Count >= MonthlySkillLimit) break;
             }
+            return names.Count == 0 ? "无" : string.Join("、", names.ToArray());
+        }
+
+        private static string ListUnlearnedRelevantSkills(List<LearnableSkill> actorSkills,
+            List<LearnableSkill> recipientSkills)
+        {
+            if (recipientSkills == null) return "未知，必须重新查询";
+            var learned = new HashSet<short>();
+            foreach (LearnableSkill skill in recipientSkills)
+                if (skill != null) learned.Add(skill.TemplateId);
+            var names = new List<string>();
+            if (actorSkills != null)
+                foreach (LearnableSkill skill in actorSkills)
+                {
+                    if (skill == null || string.IsNullOrWhiteSpace(skill.Name)
+                        || learned.Contains(skill.TemplateId)) continue;
+                    names.Add(skill.Name);
+                    if (names.Count >= MonthlySkillLimit) break;
+                }
             return names.Count == 0 ? "无" : string.Join("、", names.ToArray());
         }
 

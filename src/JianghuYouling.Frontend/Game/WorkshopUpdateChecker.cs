@@ -191,6 +191,32 @@ namespace JianghuYouling
             source = 0;
             try
             {
+                // Resolve the actual loaded instance instead of mutable display metadata.
+                string currentModId = Plugin.Instance?.ModIdStr;
+                if (!string.IsNullOrWhiteSpace(currentModId))
+                {
+                    var currentInfo = ModManager.GetModInfo(currentModId);
+                    string runningVersion = Plugin.Instance?.PluginVersion;
+                    if (System.Version.TryParse(runningVersion, out _))
+                    {
+                        if (currentInfo != null)
+                        {
+                            version = runningVersion;
+                            fileId = currentInfo.ModId.FileId;
+                            source = currentInfo.ModId.Source;
+                            return true;
+                        }
+                        string[] identity = currentModId.Split('_');
+                        if (identity.Length == 2 && byte.TryParse(identity[0], out byte parsedSource)
+                            && ulong.TryParse(identity[1], out ulong parsedId) && parsedId > 0)
+                        {
+                            version = runningVersion;
+                            fileId = parsedId;
+                            source = parsedSource;
+                            return true;
+                        }
+                    }
+                }
                 if (ModManager.EnabledMods == null) return false;
                 foreach (var modId in ModManager.EnabledMods)
                 {

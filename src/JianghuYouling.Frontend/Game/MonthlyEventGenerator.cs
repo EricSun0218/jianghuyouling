@@ -943,7 +943,7 @@ namespace JianghuYouling
                     (ok, text) => { checkpointOk = ok; eventText = text; });
             if (!checkpointOk)
             {
-                Debug.LogWarning("[江湖有灵] 过月事件:事件 Agent 或操作日志 checkpoint 失败，停止本月后续行动与叙事");
+                Debug.LogWarning("[江湖有灵] 过月事件:本轮未完成可发布的行动链，停止后续行动与叙事；具体原因见前面的 Agent、最低行动要求或持久化诊断");
                 yield break;
             }
             if (saga.PendingOperationIds != null && saga.PendingOperationIds.Count > 0)
@@ -1487,7 +1487,7 @@ namespace JianghuYouling
                     + "太吾只有在下方存在近期参与证据时才能写入本回；这时可让其本人原话与选择影响人物决定。event_taiwu_fame 只能在至少一项本回真实事件行动成功后调用一次，evidence_id 必须引用太吾本人近期原话，并且原话必须明确劝善、主张行侠或明确教唆、威胁作恶；寻常寒暄、NPC 回复和 NPC Actions 都不得改变太吾名望。"
                     + "连载地点由第一章冻结；太吾后来身处异地仍可借千里传音、与当事人对话和远程选择参与并改变后续，不得因太吾不在现场而忽略有效参与证据。"
                     + "所有真实工具结果都会由代码自动写入相关人物的记忆。因果已经自然落定或被权威回执明确阻断时，直接停止调用工具；"
-                    + "最后只需简短确认本回行动已经收束，不要撰写故事正文。正文由玩家点击详情后交给后台模型生成。\n"
+                    + "最后只回复‘本轮结束’，不能返回空消息，不要撰写故事正文。正文由玩家点击详情后交给后台模型生成。\n"
                      + "查询只用于决定行动前主动比较事实；已经决定明确动作时可以直接调用动作工具，代码会自动补齐所需权威前置，全部可靠便在同一工具轮继续执行。自动预检不可靠或条件不符时不会产生副作用，并会一次返回完整原因；查询或预检拒绝不算已经发生的失败，不得写入执行结果。\n\n"
                      + "人物资料中的身龄是受各方面影响后当前呈现出的生理、外观与社交年龄，命龄是实际已经生存的总年数；两者可能不同，不得混用。初始名册筛选与社会互动优先按身龄理解，涉及游戏硬性资格时服从工具回执。\n\n"
                      + "初始名册末尾的“实时接触方式”由代码按每个人当前权威位置分组：同一位置组才能当面，跨组只能千里传音；选择任何赠物、交换、偷窃、疗伤、传授或其他当面物理行为时必须据此判断，不能把整份群体误当作都在同一地块。位置会变化，动作执行层还会再次复核。\n\n"
@@ -1644,7 +1644,7 @@ namespace JianghuYouling
                             Debug.LogWarning("[JHYL_MONTHLY_EVENT_PRE_MINIMUM_FUSE] round="
                                 + (round + 1) + " progress=" + MonthlyEventActionProgress(
                                     meaningfulActionCount, actionCategories)
-                                + " reason=three_rounds_without_real_action");
+                                + " reason=three_rounds_without_action_or_new_facts");
                             break;
                         }
                         messages.Add(LlmMessage.Assistant(turn.Content ?? ""));
@@ -1654,7 +1654,7 @@ namespace JianghuYouling
                             + "。必须继续调用紧密承接当前因果的真实行动工具；不能用文字说明提前结束，"
                             + "也不能靠重复送礼、传授、刷好感或同类关系动作凑数。"
                             + (preMinimumProgressFuse.ConsecutiveNonProgressRounds >= 2
-                                ? " 已连续两轮没有新增真实行动；下一轮必须直接选择可落地行动，若权威条件确实全部阻断则如实停止，禁止继续查询或空写。"
+                                ? " 已连续两轮没有新增真实行动或权威事实；下一轮应直接选择可落地行动，若权威条件确实全部阻断则如实停止，不要重复查询或空写。"
                                 : "")));
                         // 统一保持 auto；最少行动数由本地回执门继续检查，文字说明不能提前结束。
                         continue;
@@ -1779,6 +1779,7 @@ namespace JianghuYouling
                 bool mutationDecisionConsumedThisRound = false;
                 bool queryOnlyRound = false;
                 bool roundHasSuccessfulActionReceipt = false;
+                bool roundHasNewAuthoritativeFacts = false;
                 foreach (LlmToolCall call in turn.ToolCalls)
                 {
                     if (call == null) continue;
@@ -1840,6 +1841,8 @@ namespace JianghuYouling
                             : "未执行：查询没有返回可靠结果："
                                 + (queryResult?.Text ?? "读取失败");
                         messages.Add(LlmMessage.Tool(call.Id, queryReceipt));
+                        if (!queryCacheHit && queryResult != null && queryResult.Reliable)
+                            roundHasNewAuthoritativeFacts = true;
                         continue;
                     }
                     int a = JsonArgumentReader.ReadIntOrDefault(args, "a");
@@ -2038,19 +2041,19 @@ namespace JianghuYouling
                     }
                 }
                 if (preMinimumProgressFuse.ObserveRound(completionState.MinimumSatisfied,
-                    roundHasSuccessfulActionReceipt))
+                    roundHasSuccessfulActionReceipt, roundHasNewAuthoritativeFacts))
                 {
                     Debug.LogWarning("[JHYL_MONTHLY_EVENT_PRE_MINIMUM_FUSE] round="
                         + (round + 1) + " progress=" + MonthlyEventActionProgress(
                             meaningfulActionCount, actionCategories)
-                        + " reason=three_rounds_without_real_action");
+                        + " reason=three_rounds_without_action_or_new_facts");
                     break;
                 }
                 if (postMinimumProgressFuse.ObserveToolRound(completionState.MinimumSatisfied,
-                    roundHasSuccessfulActionReceipt))
+                    roundHasSuccessfulActionReceipt, roundHasNewAuthoritativeFacts))
                 {
                     Debug.Log("[JHYL_MONTHLY_EVENT_PROGRESS_FUSE] round=" + round
-                        + " reason=two_post_minimum_rounds_without_success");
+                        + " reason=two_post_minimum_rounds_without_action_or_new_facts");
                     break;
                 }
             }

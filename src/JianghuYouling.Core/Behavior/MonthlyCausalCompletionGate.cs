@@ -96,8 +96,8 @@ namespace JianghuYouling.Core.Behavior
 
     /// <summary>
     /// Detects post-minimum exploration that is no longer producing authoritative action
-    /// receipts.  This is deliberately progress-based rather than action-count-based:
-    /// every new successful action resets the fuse, so productive causal chains remain open.
+    /// receipts or new authoritative facts. This is progress-based rather than action-count-based:
+    /// successful actions and newly hydrated prerequisites reset it; cached queries do not.
     /// </summary>
     public sealed class MonthlyPostMinimumProgressFuse
     {
@@ -112,9 +112,10 @@ namespace JianghuYouling.Core.Behavior
 
         public int ConsecutiveNonProgressRounds { get; private set; }
 
-        public bool ObserveToolRound(bool minimumSatisfied, bool hasSuccessfulActionReceipt)
+        public bool ObserveToolRound(bool minimumSatisfied, bool hasSuccessfulActionReceipt,
+            bool hasNewAuthoritativeFacts = false)
         {
-            if (!minimumSatisfied || hasSuccessfulActionReceipt)
+            if (!minimumSatisfied || hasSuccessfulActionReceipt || hasNewAuthoritativeFacts)
             {
                 ConsecutiveNonProgressRounds = 0;
                 return false;
@@ -127,7 +128,7 @@ namespace JianghuYouling.Core.Behavior
     /// <summary>
     /// Stops a monthly agent from spending the rest of its request budget on repeated queries,
     /// rejected calls or prose before it reaches the action floor.  This does not turn the
-    /// numeric floor into an action quota: every successful real action resets the fuse and the
+    /// numeric floor into an action quota: successful actions or new facts reset the fuse and the
     /// post-minimum causal controller remains responsible for deciding when a productive chain
     /// is actually complete.
     /// </summary>
@@ -144,9 +145,14 @@ namespace JianghuYouling.Core.Behavior
 
         public int ConsecutiveNonProgressRounds { get; private set; }
 
-        public bool ObserveRound(bool minimumSatisfied, bool hasSuccessfulActionReceipt)
+        public bool ObserveRound(bool minimumSatisfied, bool hasSuccessfulActionReceipt,
+            bool hasNewAuthoritativeFacts = false)
         {
-            if (minimumSatisfied || hasSuccessfulActionReceipt)
+            // A newly hydrated prerequisite is progress, not a landed action. It must not
+            // increase the action/category floor, but the model needs a later round to use it.
+            // Cached queries and failed reads never qualify; the outer request/round budget
+            // still bounds exploration even when each query discovers a different person.
+            if (minimumSatisfied || hasSuccessfulActionReceipt || hasNewAuthoritativeFacts)
             {
                 ConsecutiveNonProgressRounds = 0;
                 return false;

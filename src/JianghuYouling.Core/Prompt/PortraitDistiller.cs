@@ -207,6 +207,20 @@ namespace JianghuYouling.Core.Prompt
             return msgs;
         }
 
+        public static List<LlmMessage> BuildCustomAppendRepairMessages(string priorPortrait,
+            NpcProfileForPrompt npc, IList<string> lifeRecords, IList<string> secrets,
+            IList<string> recentMemories)
+        {
+            var messages = BuildMessages(priorPortrait, npc, lifeRecords, secrets, recentMemories);
+            messages.Add(LlmMessage.System(
+                "上一次自动补充没有通过校验。本次是唯一一次格式与证据纠正，不是重写人设。"
+                + "只允许两种输出：若无安全新增，原样输出 [[JHYL_NO_PERSONA_APPEND]]；"
+                + "否则首行必须为【本次新增】，之后每行以‘- ’开头。"
+                + "仅概括证据里后来发生、未写入追加层的长期经历或关系变化；"
+                + "禁止复述玩家原文、输出完整画像、解释、实时状态或新设定。不能确定有新增时使用无新增标记。"));
+            return messages;
+        }
+
         public static string Clean(string raw)
         {
             if (string.IsNullOrWhiteSpace(raw)) return "";

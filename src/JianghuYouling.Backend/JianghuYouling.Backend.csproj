@@ -20,7 +20,9 @@
     <Compile Include="..\Shared\ItemNameMatcher.cs" Link="Shared\ItemNameMatcher.cs" />
     <Compile Include="..\Shared\OperationReceiptCommitPolicy.cs" Link="Shared\OperationReceiptCommitPolicy.cs" />
     <Compile Include="..\JianghuYouling.Core\Behavior\MonthlyPoisonPolicy.cs" Link="Shared\MonthlyPoisonPolicy.cs" />
+    <Compile Include="..\JianghuYouling.Core\Behavior\MonthlyDangerActionPolicy.cs" Link="Shared\MonthlyDangerActionPolicy.cs" />
     <Compile Include="..\JianghuYouling.Core\Behavior\TaiwuScenePresencePolicy.cs" Link="Shared\TaiwuScenePresencePolicy.cs" />
+    <Compile Include="..\JianghuYouling.Core\Behavior\CharacterSceneAnchorResolver.cs" Link="Shared\CharacterSceneAnchorResolver.cs" />
     <Compile Include="..\JianghuYouling.Core\Commission\CommissionRewardPolicy.cs" Link="Shared\CommissionRewardPolicy.cs" />
     <Compile Include="..\JianghuYouling.Core\Commission\CommissionProgressPolicy.cs" Link="Shared\CommissionProgressPolicy.cs" />
   </ItemGroup>

@@ -500,6 +500,10 @@ namespace JianghuYouling
                     try { var r = task.Result; if (r != null && r.Ok) result = PortraitDistiller.Clean(r.Content); } catch { }
                 }
 
+                yield return RepairCustomAppendOnce(client, lease, existing, result,
+                    evidenceProfile, evidenceLife, evidenceSecrets, memoryInput.Lines,
+                    value => result = value);
+                if (!LeaseValid(lease)) yield break;
                 var currentMemory = BuildMemoryInput(snap);
                 bool customAppend = PortraitDistiller.UsesCustomPersonaAppendMode(evidenceProfile);
                 bool modelReturnedContent = !string.IsNullOrWhiteSpace(result);
@@ -526,10 +530,11 @@ namespace JianghuYouling
                     result = customAppend
                         ? PortraitDistiller.CustomPersonaAppendFallback(existing)
                         : (existing ?? PortraitStore.BuildSimple(snap));
-                    if (currentMemory.Reliable && LeaseValid(lease)
-                        && (customAppend || existing == null))
+                    // A rejected delta has not consumed the new evidence. Preserve the old
+                    // portrait and fingerprints; only a first-time placeholder may be saved.
+                    if (currentMemory.Reliable && LeaseValid(lease) && existing == null)
                         PortraitStore.Save(snap, result, customAppend ? "custom-append" : "simple",
-                            currentMemory.ValidCount, currentMemory.Fingerprint, SourceFingerprint(snap));
+                            0, "", "");
                 }
                 else if (LeaseValid(lease))
                 {
@@ -615,6 +620,11 @@ namespace JianghuYouling
                     try { var r = task.Result; if (r != null && r.Ok) result = PortraitDistiller.Clean(r.Content); } catch { }
                 }
 
+                yield return RepairCustomAppendOnce(client, lease, prior, result,
+                    evidenceProfile, evidenceLife, evidenceSecrets, recent,
+                    value => result = value);
+                if (!LeaseValid(lease)) yield break;
+                bool modelReturnedContent = !string.IsNullOrWhiteSpace(result);
                 bool customAppend = PortraitDistiller.UsesCustomPersonaAppendMode(evidenceProfile);
                 string groundingFailure = null;
                 bool grounded;
@@ -652,8 +662,8 @@ namespace JianghuYouling
                 }
                 else
                 {
-                    SuppressUpgrade(key, updateRetryFingerprint, !string.IsNullOrWhiteSpace(result));
-                    if (!string.IsNullOrWhiteSpace(result))
+                    SuppressUpgrade(key, updateRetryFingerprint, modelReturnedContent);
+                    if (modelReturnedContent)
                         Debug.LogWarning("[JHYL_PORTRAIT_REJECTED] npc=" + snap.NpcId + " reason=" + groundingFailure);
                 }
             }
@@ -661,6 +671,38 @@ namespace JianghuYouling
             {
                 EndLease(lease);
             }
+        }
+
+        private static IEnumerator RepairCustomAppendOnce(OpenAiCompatibleClient client,
+            GenerationLease lease, string prior, string raw, NpcProfileForPrompt profile,
+            IList<string> life, IList<string> secrets, IList<string> memories,
+            Action<string> onResult)
+        {
+            onResult(raw);
+            if (!LeaseValid(lease) || !PortraitDistiller.UsesCustomPersonaAppendMode(profile)
+                || string.IsNullOrWhiteSpace(raw)
+                || PortraitDistiller.TryMergeCustomPersonaAppend(prior, raw, profile,
+                    life, secrets, memories, out _, out _)) yield break;
+            System.Threading.Tasks.Task<LlmResult> repair = null;
+            try
+            {
+                repair = client.SendAsync(PortraitDistiller.BuildCustomAppendRepairMessages(
+                    prior, profile, life, secrets, memories), 0, ct: lease.Cancellation.Token,
+                    timeoutSec: 180, tag: "画像增量纠正", reasoningPolicy: LlmReasoningPolicy.Auto);
+            }
+            catch { }
+            if (repair == null) yield break;
+            yield return new WaitUntil(() => repair.IsCompleted || !LeaseValid(lease));
+            if (!LeaseValid(lease)) yield break;
+            try
+            {
+                LlmResult result = repair.Result;
+                if (result != null && result.Ok && !string.IsNullOrWhiteSpace(result.Content))
+                    onResult(PortraitDistiller.Clean(result.Content));
+            }
+            catch { }
+            // The caller validates again before saving. No invalid result is normalized
+            // into accepted evidence, and a second rejection never starts another retry.
         }
 
         private sealed class MemoryInput

@@ -40,7 +40,7 @@ namespace JianghuYouling.Backend
     /// 《江湖有灵》后端薄插件:跑在后端逻辑线程,持有真实游戏域(Character/Taiwu…)。
     /// 仅暴露需后端权限的写操作 + RPC 入口。M1 先只有一个 Ping 验证前后端通路。
     /// </summary>
-    [PluginConfig("江湖有灵 Backend", "jianghuyouling", "0.34.0.25")]
+    [PluginConfig("江湖有灵 Backend", "jianghuyouling", "0.34.0.26")]
     public sealed class BackendPluginMain : TaiwuRemakePlugin
     {
         private const int DefaultNpcTravelDurationMonths = 6;
@@ -2506,7 +2506,8 @@ namespace JianghuYouling.Backend
                         if (actorId <= 0 || !DomainManager.Character.TryGetElement_Objects(actorId, out actor)
                             || actor == null) return Fail("invalid_char", "行动者无效");
                         var ids = new SortedSet<int> { actorId };
-                        Location loc = actor.GetLocation();
+                        Location loc = GetPhysicalSceneLocation(actor);
+                        if (!loc.IsValid()) return Fail("actor_location_unavailable", "行动者当前没有可确认的有效所在地");
                         MapBlockData blockData;
                         if (loc.IsValid() && DomainManager.Map.TryGetBlock(loc, out blockData)
                             && blockData != null && blockData.CharacterSet != null)
@@ -2545,8 +2546,10 @@ namespace JianghuYouling.Backend
                         int cid = 0; p.Get("char", out cid);
                         Character c;
                         if (cid <= 0 || !DomainManager.Character.TryGetElement_Objects(cid, out c) || c == null) return Fail("invalid_char", "角色无效");
-                        var loc = c.GetLocation();
-                        var okLoc = new SerializableModData(); okLoc.Set("success", loc.IsValid());
+                        var loc = GetPhysicalSceneLocation(c);
+                        // No map position is a valid query result, not an RPC failure.
+                        var okLoc = new SerializableModData(); okLoc.Set("success", true);
+                        okLoc.Set("location_valid", loc.IsValid());
                         okLoc.Set("area", loc.IsValid() ? loc.AreaId : (short)-1);
                         okLoc.Set("block", loc.IsValid() ? loc.BlockId : (short)-1);
                         return okLoc;
@@ -2864,8 +2867,8 @@ namespace JianghuYouling.Backend
                         result.Set("target_adult", targetAlive && tc.GetAgeGroup() == 2);
                         bool actorInfected = actorAlive && ac.IsCompletelyInfected();
                         bool targetInfected = targetAlive && tc.IsCompletelyInfected();
-                        Location actorLocation = actorAlive ? ac.GetLocation() : Location.Invalid;
-                        Location targetLocation = targetAlive ? tc.GetLocation() : Location.Invalid;
+                        Location actorLocation = actorAlive ? GetPhysicalSceneLocation(ac) : Location.Invalid;
+                        Location targetLocation = targetAlive ? GetPhysicalSceneLocation(tc) : Location.Invalid;
                         bool sameValidLocation = actorAlive && targetAlive
                             && SameValidLocation(ac, tc);
                         int actorConsummate = actorAlive ? ac.GetConsummateLevel() : -1;
@@ -6512,11 +6515,44 @@ namespace JianghuYouling.Backend
                 || DomainManager.Organization.GetPrisonerSect(actorId) >= 0;
         }
 
+        private static Location GetPhysicalSceneLocation(Character character)
+        {
+            if (character == null) return Location.Invalid;
+            bool resolved = CharacterSceneAnchorResolver.TryResolve(character.GetId(), id =>
+            {
+                Character current;
+                if (!DomainManager.Character.TryGetElement_Objects(id, out current)
+                    || current == null) return null;
+                int carrier = current.GetKidnapperId();
+                if (carrier >= 0) return carrier;
+                if (DomainManager.Organization.GetPrisonerSect(id) >= 0) return id;
+                int leader = current.GetLeaderId();
+                if (leader > 0 && leader != id)
+                {
+                    // Special followers may have no independent map location. Require
+                    // actual native membership, not merely a leftover leader field.
+                    bool follows = DomainManager.Character.IsSpecialGroupMember(current);
+                    if (!follows)
+                    {
+                        try { follows = DomainManager.Character.GetGroup(leader).Contains(id); }
+                        catch (KeyNotFoundException) { }
+                    }
+                    if (!follows && leader == DomainManager.Taiwu.GetTaiwuCharId())
+                        follows = DomainManager.Taiwu.IsInGroup(id);
+                    if (follows) return leader;
+                }
+                return id;
+            }, out int anchorId);
+            Character anchor;
+            return resolved && DomainManager.Character.TryGetElement_Objects(anchorId, out anchor)
+                && anchor != null ? anchor.GetLocation() : Location.Invalid;
+        }
+
         private static bool SameValidLocation(Character actor, Character target)
         {
             if (actor == null || target == null) return false;
-            Location actorLocation = actor.GetLocation();
-            Location targetLocation = target.GetLocation();
+            Location actorLocation = GetPhysicalSceneLocation(actor);
+            Location targetLocation = GetPhysicalSceneLocation(target);
             if (actorLocation.IsValid() && targetLocation.IsValid()
                 && actorLocation.Equals(targetLocation)) return true;
 
@@ -6575,7 +6611,10 @@ namespace JianghuYouling.Backend
                 case "poison":
                     parameter.Get("actor", out actorId);
                     parameter.Get("target", out targetId);
-                    return actorId > 0 && targetId > 0;
+                    int monthlyOnlyPurity = 0;
+                    parameter.Get("monthly_only_purity", out monthlyOnlyPurity);
+                    return actorId > 0 && targetId > 0
+                        && MonthlyDangerActionPolicy.RequiresCoLocation(op, monthlyOnlyPurity);
                 case "heal":
                     parameter.Get("healer", out actorId);
                     parameter.Get("target", out targetId);
@@ -6597,8 +6636,9 @@ namespace JianghuYouling.Backend
         private static SerializableModData Kill(DataContext context, SerializableModData p)
         {
             if (context == null || p == null) return Fail("invalid_request", "行凶请求不完整");
-            int npcId = 0, targetId = 0;
+            int npcId = 0, targetId = 0, monthlyOnlyPurity = 0;
             if (!p.Get("npc_id", out npcId) || !p.Get("target_id", out targetId)) return Fail("missing_parameter", "缺少参数");
+            p.Get("monthly_only_purity", out monthlyOnlyPurity);
             if (npcId <= 0 || targetId <= 0 || npcId == targetId) return Fail("bad_args", "参数无效");
             if (targetId == DomainManager.Taiwu.GetTaiwuCharId()) return Fail("is_taiwu", "不可加害太吾");
 
@@ -6608,7 +6648,8 @@ namespace JianghuYouling.Backend
                 return Fail("character_not_found", "目标已不在世或失效");
             if (IsActorRestrained(npc, npcId))
                 return Fail("actor_restrained", "此人正被囚禁或绑架，无法行凶");
-            if (!SameValidLocation(npc, target))
+            if (MonthlyDangerActionPolicy.RequiresCoLocation("kill", monthlyOnlyPurity)
+                && !SameValidLocation(npc, target))
                 return Fail("not_co_located", "双方当前不在同一有效地块，不能当面行凶");
 
             sbyte npcLv = npc.GetConsummateLevel(), tgtLv = target.GetConsummateLevel();
@@ -6749,7 +6790,8 @@ namespace JianghuYouling.Backend
                 return Fail("character_not_found", "目标已不在世或失效");
             if (IsActorRestrained(npc, npcId))
                 return Fail("actor_restrained", "此人正被囚禁或绑架，无法擒拿他人");
-            if (!SameValidLocation(npc, target))
+            if (MonthlyDangerActionPolicy.RequiresCoLocation("capture", monthlyOnlyPurity)
+                && !SameValidLocation(npc, target))
                 return Fail("not_co_located", "双方当前不在同一有效地块，不能当面擒拿");
 
             sbyte npcLv = npc.GetConsummateLevel(), tgtLv = target.GetConsummateLevel();
@@ -9442,8 +9484,8 @@ namespace JianghuYouling.Backend
                     && (!DomainManager.Character.TryGetElement_Objects(taiwuId, out taiwu) || taiwu == null))
                     return TaiwuScenePresencePolicy.IsPresent(false, false,
                         kidnappedByTaiwu, false, false);
-                Location endpointLocation = endpoint.GetLocation();
-                Location taiwuLocation = taiwu.GetLocation();
+                Location endpointLocation = GetPhysicalSceneLocation(endpoint);
+                Location taiwuLocation = GetPhysicalSceneLocation(taiwu);
                 Location villageLocation = DomainManager.Taiwu.GetTaiwuVillageLocation();
                 bool inTaiwuVillagePrisonWithTaiwuPresent = inTaiwuVillagePrison
                     && taiwuLocation.IsValid() && villageLocation.IsValid()
@@ -9470,8 +9512,8 @@ namespace JianghuYouling.Backend
                     && (!DomainManager.Character.TryGetElement_Objects(charId, out endpoint) || endpoint == null))
                     return false;
                 if (endpoint.GetKidnapperId() == actorId) return true;
-                Location actorLocation = actor.GetLocation();
-                Location endpointLocation = endpoint.GetLocation();
+                Location actorLocation = GetPhysicalSceneLocation(actor);
+                Location endpointLocation = GetPhysicalSceneLocation(endpoint);
                 return actorLocation.IsValid() && endpointLocation.IsValid()
                     && actorLocation.Equals(endpointLocation);
             }
