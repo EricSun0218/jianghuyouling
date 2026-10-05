@@ -3879,7 +3879,7 @@ namespace JianghuYouling
             hl.childAlignment = TextAnchor.MiddleLeft;
 
             var t = NewText("T", row.transform, 17, TextAlignmentOptions.Left);
-            t.text = "（" + kind + ":" + what + "）";
+            t.text = GlyphSanitizer.Clean("（" + kind + ":" + what + "）");
             t.color = color;
             t.raycastTarget = false;
             var tle = t.gameObject.AddComponent<LayoutElement>();

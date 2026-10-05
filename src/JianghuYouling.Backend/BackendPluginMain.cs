@@ -40,7 +40,7 @@ namespace JianghuYouling.Backend
     /// 《江湖有灵》后端薄插件:跑在后端逻辑线程,持有真实游戏域(Character/Taiwu…)。
     /// 仅暴露需后端权限的写操作 + RPC 入口。M1 先只有一个 Ping 验证前后端通路。
     /// </summary>
-    [PluginConfig("江湖有灵 Backend", "jianghuyouling", "0.34.0.26")]
+    [PluginConfig("江湖有灵 Backend", "jianghuyouling", "0.34.0.27")]
     public sealed class BackendPluginMain : TaiwuRemakePlugin
     {
         private const int DefaultNpcTravelDurationMonths = 6;
@@ -2507,7 +2507,9 @@ namespace JianghuYouling.Backend
                             || actor == null) return Fail("invalid_char", "行动者无效");
                         var ids = new SortedSet<int> { actorId };
                         Location loc = GetPhysicalSceneLocation(actor);
-                        if (!loc.IsValid()) return Fail("actor_location_unavailable", "行动者当前没有可确认的有效所在地");
+                        if (!loc.IsValid())
+                            return WithCharacterState(Fail("actor_location_unavailable",
+                                "行动者当前没有可确认的有效所在地"), actor);
                         MapBlockData blockData;
                         if (loc.IsValid() && DomainManager.Map.TryGetBlock(loc, out blockData)
                             && blockData != null && blockData.CharacterSet != null)
@@ -2552,6 +2554,7 @@ namespace JianghuYouling.Backend
                         okLoc.Set("location_valid", loc.IsValid());
                         okLoc.Set("area", loc.IsValid() ? loc.AreaId : (short)-1);
                         okLoc.Set("block", loc.IsValid() ? loc.BlockId : (short)-1);
+                        if (!loc.IsValid()) WithCharacterState(okLoc, c);
                         return okLoc;
                     }
                     case "travel_state":   // 只读:当前有效普通行程/动态寻人/固定赴约状态，供每轮对话淘汰旧承诺。
@@ -2863,6 +2866,7 @@ namespace JianghuYouling.Backend
                         var result = new SerializableModData();
                         result.Set("success", true);
                         result.Set("actor_alive", actorAlive); result.Set("target_alive", targetAlive);
+                        result.Set("actor_restrained", actorAlive && IsActorRestrained(ac, actor));
                         result.Set("actor_adult", actorAlive && ac.GetAgeGroup() == 2);
                         result.Set("target_adult", targetAlive && tc.GetAgeGroup() == 2);
                         bool actorInfected = actorAlive && ac.IsCompletelyInfected();
@@ -6515,6 +6519,33 @@ namespace JianghuYouling.Backend
                 || DomainManager.Organization.GetPrisonerSect(actorId) >= 0;
         }
 
+        private static SerializableModData WithCharacterState(SerializableModData response, Character character)
+        {
+            if (response == null || character == null) return response;
+            try
+            {
+                Location raw = character.GetLocation();
+                Location scene = GetPhysicalSceneLocation(character);
+                // Scalar state only: enough to distinguish a carrier, prison, travel and
+                // story ownership without exporting the save, dialogue or custom persona.
+                response.Set("character_state", "char_id=" + character.GetId()
+                    + " raw_area=" + raw.AreaId + " raw_block=" + raw.BlockId
+                    + " scene_area=" + scene.AreaId + " scene_block=" + scene.BlockId
+                    + " kidnapper=" + character.GetKidnapperId()
+                    + " leader=" + character.GetLeaderId()
+                    + " prison_sect=" + DomainManager.Organization.GetPrisonerSect(character.GetId())
+                    + " external_state=" + character.GetExternalRelationState()
+                    + " cross_area=" + character.IsCrossAreaTraveling());
+            }
+            catch (Exception e)
+            {
+                // Diagnostics must not turn a definite refusal into an uncertain mutation.
+                response.Set("character_state", "char_id=" + character.GetId()
+                    + " state_read_error=" + e.GetType().Name);
+            }
+            return response;
+        }
+
         private static Location GetPhysicalSceneLocation(Character character)
         {
             if (character == null) return Location.Invalid;
@@ -6544,8 +6575,21 @@ namespace JianghuYouling.Backend
                 return id;
             }, out int anchorId);
             Character anchor;
-            return resolved && DomainManager.Character.TryGetElement_Objects(anchorId, out anchor)
-                && anchor != null ? anchor.GetLocation() : Location.Invalid;
+            if (!resolved || !DomainManager.Character.TryGetElement_Objects(anchorId, out anchor)
+                || anchor == null) return Location.Invalid;
+            Location direct = anchor.GetLocation();
+            if (direct.IsValid()) return direct;
+            if (anchor.IsActiveExternalRelationState(32uL))
+            {
+                sbyte prisonSect = DomainManager.Organization.GetPrisonerSect(anchorId);
+                if (prisonSect >= 0)
+                {
+                    var prison = DomainManager.Organization.GetSettlementByOrgTemplateId(prisonSect);
+                    if (prison != null) return prison.GetLocation();
+                }
+            }
+            // A travel/adventure map anchor is not proof of physical presence in a tile.
+            return Location.Invalid;
         }
 
         private static bool SameValidLocation(Character actor, Character target)
@@ -7505,7 +7549,7 @@ namespace JianghuYouling.Backend
 
             if (!TryGetNpcTravelEligibility(npcId, npc,
                 out string travelCode, out string travelReason))
-                return Fail(travelCode, travelReason);
+                return WithCharacterState(Fail(travelCode, travelReason), npc);
 
             int duration = DefaultNpcTravelDurationMonths;
             int requestedDuration;

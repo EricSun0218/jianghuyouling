@@ -140,6 +140,24 @@ namespace JianghuYouling.Rpc
                 if (!CallStateWorldStillSame(this))
                     response = Outcome(false, "unknown", "world_changed", true, OperationId,
                         "已切换或离开存档，副作用结果未知；回到原存档后仅查询回执");
+                try
+                {
+                    bool succeeded = false;
+                    response?.Get("success", out succeeded);
+                    if (!succeeded)
+                    {
+                        ReadOutcome(response, out string status, out string code, out bool retryable);
+                        string characterState = null;
+                        response?.Get("character_state", out characterState);
+                        // Deliberately omit arguments, dialogue and receipt bodies. The code and
+                        // operation id are enough to correlate a refusal across all RPC methods.
+                        Debug.Log("[JHYL_RPC_OUTCOME] method=" + Method + " op=" + OperationId
+                            + " status=" + (status ?? "unknown") + " code=" + (code ?? "missing_code")
+                            + " retryable=" + retryable
+                            + (string.IsNullOrEmpty(characterState) ? "" : " " + characterState));
+                    }
+                }
+                catch { } // A diagnostic failure must never suppress the exactly-once callback.
                 try { Callback?.Invoke(response); }
                 catch (Exception e) { Debug.LogWarning("[江湖有灵] operation callback 异常:" + e.GetType().Name); }
                 // 由本客户端临时生成 id 的调用没有 durable 恢复者；回调已同步消费终态后即可 ACK，

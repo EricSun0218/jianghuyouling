@@ -1599,7 +1599,9 @@ namespace JianghuYouling
                     LlmLog.RecordTrajectory("同道过月 Agent", traceRoot.WithRound(round), call.Name,
                         notExecuted ? "not_executed" : ToolResultUnknown(toolResult) ? "unknown"
                             : ToolResultSucceeded(toolResult) ? "succeeded" : "rejected", operationId,
-                        notExecuted ? SanitizeTrajectoryReason(toolResult) : null);
+                        notExecuted ? SanitizeTrajectoryReason(toolResult)
+                            : ToolResultSucceeded(toolResult) ? null
+                            : ReadMutationFailureCode(mutationJournalPath, operationId));
                     if (notExecuted)
                     {
                         messages.Add(LlmMessage.Tool(call.Id, (toolResult ?? "未执行：前置条件不满足")
@@ -4762,6 +4764,25 @@ namespace JianghuYouling
         private static bool ToolResultNotExecuted(string s)
             => !string.IsNullOrWhiteSpace(s) && s.TrimStart().StartsWith("未执行：", StringComparison.Ordinal);
 
+        private static string ReadMutationFailureCode(string journalPath, string operationId)
+        {
+            // Export the typed error, not a result paragraph that can contain private dialogue.
+            if (string.IsNullOrWhiteSpace(operationId)) return "local_action_rejected";
+            try
+            {
+                lock (JournalIo)
+                {
+                    var journal = LoadMutationJournal(journalPath);
+                    if (journal?.Entries != null)
+                        foreach (var entry in journal.Entries)
+                            if (entry != null && entry.OperationId == operationId)
+                                return string.IsNullOrWhiteSpace(entry.Code) ? entry.Status : entry.Code;
+                }
+            }
+            catch { }
+            return "operation_receipt_unavailable";
+        }
+
         private static string SanitizeTrajectoryReason(string value)
         {
             if (string.IsNullOrWhiteSpace(value)) return null;
@@ -6287,6 +6308,9 @@ namespace JianghuYouling
             if (!completed || state == null) { done?.Invoke("人物、关系与能力状态读取超时"); yield break; }
             if (!state.ActorAlive) { done?.Invoke("行动者已不在江湖"); yield break; }
             if (!state.TargetAlive) { done?.Invoke("目标已不在江湖"); yield break; }
+            if ((normalized == "poison" || normalized == "capture" || normalized == "kill")
+                && state.ActorRestrained)
+            { done?.Invoke("actor_restrained：行动者正被囚禁或绑架，不能下毒、擒拿或行凶；请改用可行行动"); yield break; }
             if ((normalized == "matchmake" || normalized == "spend_night")
                 && (!state.ActorAdult || !state.TargetAdult))
             { done?.Invoke("双方并非都已成年"); yield break; }

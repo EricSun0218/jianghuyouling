@@ -3483,6 +3483,9 @@ namespace JianghuYouling
             if (!done || state == null) { onDone?.Invoke(false, "人物与关系的权威预查超时"); yield break; }
             if (!state.ActorAlive) { onDone?.Invoke(false, (actor.Value ?? "行动者") + "已不在江湖"); yield break; }
             if (!state.TargetAlive) { onDone?.Invoke(false, (target.Value ?? "目标") + "已不在江湖"); yield break; }
+            if ((tool == "event_kill" || tool == "event_capture" || tool == "event_poison")
+                && state.ActorRestrained)
+            { onDone?.Invoke(false, "actor_restrained：行动者正被囚禁或绑架，不能下毒、擒拿或行凶；请换人物或行动"); yield break; }
             if (RequiresCoLocatedMonthlyAction(tool) && !state.SameValidLocation)
             {
                 onDone?.Invoke(false, "双方当前不在同一有效地块，不能完成这项当面行动"

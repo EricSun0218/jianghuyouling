@@ -7857,7 +7857,7 @@ namespace JianghuYouling.DevTest
                 customDistillPrompt.Contains("JYL_CUSTOM_PERSONA_EVOLUTION_SENTINEL").ToString(), "True");
             AssertEq("画像蒸馏声明玩家原文不可改写",
                 (customDistillPrompt.Contains("玩家原文永远不允许被模型修改")
-                 && customDistillPrompt.Contains("只输出【本次新增】")
+                 && customDistillPrompt.Contains("用普通文本段落即可")
                  && customDistillPrompt.Contains("不得复述玩家原文")).ToString(), "True");
             var appendProfile = new NpcProfileForPrompt
             {
@@ -7887,7 +7887,7 @@ namespace JianghuYouling.DevTest
                 "本次新增：\n- 因与太吾共同查清旧案，已把太吾视作可靠的案卷同盟，并约定继续追查。",
                 appendProfile, null, null, appendMemories, out string normalizedLayer,
                 out appendReason);
-            AssertEq("自动追加兼容模型省略装饰括号但仍严格要求纯增量项目",
+            AssertEq("自动追加由代码处理装饰标题",
                 (normalizedDeltaMerged && normalizedLayer.Contains("案卷同盟")).ToString(), "True");
             bool noChangeMerged = PortraitDistiller.TryMergeCustomPersonaAppend(firstAppendLayer,
                 PortraitDistiller.NoCustomPersonaAppendToken, appendProfile, null, null,
@@ -7907,7 +7907,8 @@ namespace JianghuYouling.DevTest
                 appendMemories, out appendLayer, out appendReason);
             AssertEq("自动追加仍拒绝无证据事件与强关系", ungroundedRejected.ToString(), "True");
             var appendRepairMessages = PortraitDistiller.BuildCustomAppendRepairMessages(
-                firstAppendLayer, appendProfile, null, null, appendMemories);
+                firstAppendLayer, appendProfile, null, null, appendMemories,
+                "REJECTED_DELTA_SENTINEL", "REJECTION_REASON_SENTINEL", true);
             AssertEq("增量纠正保留原始证据并明确只准一次",
                 (appendRepairMessages.Last().Content.Contains("唯一一次")
                     && appendRepairMessages.Last().Content.Contains(PortraitDistiller.NoCustomPersonaAppendToken)
@@ -7916,6 +7917,49 @@ namespace JianghuYouling.DevTest
             AssertEq("增量纠正不把玩家人设提升成系统消息",
                 appendRepairMessages.Where(m => m.Role == "system")
                     .Any(m => (m.Content ?? "").Contains("他固定以‘守约人’自居")).ToString(), "False");
+            AssertEq("增量纠正带回实际失败正文和原因但只作为不可信数据",
+                (appendRepairMessages.Any(m => m.Role == "user"
+                    && m.Content.Contains("REJECTED_DELTA_SENTINEL")
+                    && m.Content.Contains("REJECTION_REASON_SENTINEL"))
+                 && !appendRepairMessages.Any(m => m.Role == "system"
+                    && m.Content.Contains("REJECTED_DELTA_SENTINEL"))
+                 && appendRepairMessages.Any(m => m.Content.Contains("明确点击了“AI 更新”")))
+                .ToString(), "True");
+            const string plainDelta = "因与太吾共同查清旧案，已把太吾视作可靠的案卷同盟，并约定继续追查。";
+            foreach (string presentation in new[] { plainDelta, "1. " + plainDelta,
+                "• " + plainDelta, "* " + plainDelta, "（1）" + plainDelta,
+                "```text\n" + plainDelta + "\n```", "【本次新增】\n\n" + plainDelta })
+            {
+                bool accepted = PortraitDistiller.TryMergeCustomPersonaAppend(null, presentation,
+                    appendProfile, null, null, appendMemories, out string normalized, out _);
+                AssertEq("段落与列表排版统一进入相同内容校验:" + presentation.Substring(0, Math.Min(8, presentation.Length)),
+                    (accepted && normalized == firstAppendLayer).ToString(), "True");
+                bool unchanged = PortraitDistiller.TryMergeCustomPersonaAppend(firstAppendLayer, presentation,
+                    appendProfile, null, null, appendMemories, out string deduplicated, out _);
+                AssertEq("改变排版不会重复追加已有事实", (unchanged && deduplicated == firstAppendLayer).ToString(), "True");
+            }
+            foreach (string unsafeDelta in new[] { "", "【本次新增】", "【身份与处境】他来自不明之地。",
+                "{\"新增\":\"凭空杜撰\"}", "他固定以‘守约人’自居，性情沉静。",
+                "从此自称改为无名客。", "第999月与「无证据之人」结为夫妻。", "目前心情低落。",
+                "-", "抱歉，无法生成内容。", "以下是本次新增：", "暂无可安全追加的新事实。" })
+            {
+                bool rejected = !PortraitDistiller.TryMergeCustomPersonaAppend(firstAppendLayer, unsafeDelta,
+                    appendProfile, null, null, appendMemories, out string preserved, out _);
+                AssertEq("纯文本追加仍拒绝空内容重写复述与无证据事实:" + unsafeDelta,
+                    (rejected && preserved == firstAppendLayer).ToString(), "True");
+            }
+            bool decoratedNoOp = PortraitDistiller.TryMergeCustomPersonaAppend(firstAppendLayer,
+                "【本次新增】\n- " + PortraitDistiller.NoCustomPersonaAppendToken,
+                appendProfile, null, null, appendMemories, out string noOpLayer, out _);
+            AssertEq("装饰排版中的无新增标记不进入人物记忆",
+                (decoratedNoOp && noOpLayer == firstAppendLayer).ToString(), "True");
+            string longParagraph = plainDelta + new string('甲', 610);
+            AssertEq("单段长文本不再因项目符号条目长度而拒绝",
+                PortraitDistiller.TryMergeCustomPersonaAppend(null, longParagraph,
+                    appendProfile, null, null, appendMemories, out _, out _).ToString(), "True");
+            AssertEq("纯文本追加仍有整体长度上限",
+                PortraitDistiller.TryMergeCustomPersonaAppend(firstAppendLayer, new string('甲', 2401),
+                    appendProfile, null, null, appendMemories, out _, out _).ToString(), "False");
 
             var wb = WorldBookFilter.Resolve("常驻设定\n＠＠剑冢\n触发设定\n＠＠结束\n!临场铁令", "谈及剑冢");
             AssertEq("世界书全角块常驻分离", wb.StableBackground.Contains("常驻设定").ToString(), "True");
@@ -8553,7 +8597,8 @@ namespace JianghuYouling.DevTest
                     && source.Contains("CommitCompanionActorOutcomeMemory(")).ToString(), "True");
             AssertEq("同道未执行轨迹记录截断脱敏具体原因",
                 (source.Contains("MaxTrajectoryReasonChars = 240")
-                    && source.Contains("notExecuted ? SanitizeTrajectoryReason(toolResult) : null")
+                    && source.Contains("notExecuted ? SanitizeTrajectoryReason(toolResult)")
+                    && source.Contains("ReadMutationFailureCode(mutationJournalPath, operationId)")
                     && source.Contains("SecretRedactor.Redact(value).Trim()")
                     && source.Contains("safe[safe.Length - 1] = '…'")
                     && llmLogSource.Contains("observed.Outcome, \"not_executed\"")).ToString(), "True");

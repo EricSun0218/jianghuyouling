@@ -502,7 +502,7 @@ namespace JianghuYouling
 
                 yield return RepairCustomAppendOnce(client, lease, existing, result,
                     evidenceProfile, evidenceLife, evidenceSecrets, memoryInput.Lines,
-                    value => result = value);
+                    value => result = value, forceRegeneration);
                 if (!LeaseValid(lease)) yield break;
                 var currentMemory = BuildMemoryInput(snap);
                 bool customAppend = PortraitDistiller.UsesCustomPersonaAppendMode(evidenceProfile);
@@ -676,18 +676,19 @@ namespace JianghuYouling
         private static IEnumerator RepairCustomAppendOnce(OpenAiCompatibleClient client,
             GenerationLease lease, string prior, string raw, NpcProfileForPrompt profile,
             IList<string> life, IList<string> secrets, IList<string> memories,
-            Action<string> onResult)
+            Action<string> onResult, bool explicitAppendRequest = false)
         {
             onResult(raw);
             if (!LeaseValid(lease) || !PortraitDistiller.UsesCustomPersonaAppendMode(profile)
-                || string.IsNullOrWhiteSpace(raw)
-                || PortraitDistiller.TryMergeCustomPersonaAppend(prior, raw, profile,
-                    life, secrets, memories, out _, out _)) yield break;
+                || string.IsNullOrWhiteSpace(raw)) yield break;
+            if (PortraitDistiller.TryMergeCustomPersonaAppend(prior, raw, profile,
+                life, secrets, memories, out _, out string rejectionReason)) yield break;
             System.Threading.Tasks.Task<LlmResult> repair = null;
             try
             {
                 repair = client.SendAsync(PortraitDistiller.BuildCustomAppendRepairMessages(
-                    prior, profile, life, secrets, memories), 0, ct: lease.Cancellation.Token,
+                    prior, profile, life, secrets, memories, raw, rejectionReason,
+                    explicitAppendRequest), 0, ct: lease.Cancellation.Token,
                     timeoutSec: 180, tag: "画像增量纠正", reasoningPolicy: LlmReasoningPolicy.Auto);
             }
             catch { }

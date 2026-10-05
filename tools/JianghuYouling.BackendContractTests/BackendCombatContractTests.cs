@@ -162,6 +162,22 @@ namespace JianghuYouling.BackendContractTests
                     "monthly preflight returns the authoritative live co-location verdict");
                 RequireContains(effects, "resp.Get(\"same_valid_location\", out value.SameValidLocation);",
                     "frontend monthly preflight parses the authoritative co-location verdict");
+                RequireContains(backend, "result.Set(\"actor_restrained\", actorAlive && IsActorRestrained(ac, actor));",
+                    "monthly preflight reads the same restraint authority as dangerous action execution");
+                RequireContains(effects, "if (!resp.Get(\"actor_restrained\", out value.ActorRestrained))",
+                    "missing restraint evidence fails closed instead of being treated as unrestricted");
+                RequireContains(monthlyEvent, "&& state.ActorRestrained)",
+                    "world-event preflight refuses dangerous actions by restrained actors");
+                RequireContains(companion, "&& state.ActorRestrained)",
+                    "companion preflight refuses dangerous actions by restrained actors");
+                RequireContains(companion, "ReadMutationFailureCode(mutationJournalPath, operationId)",
+                    "failed companion traces use the durable error code rather than dialogue text");
+                RequireContains(operationRpc, "[JHYL_RPC_OUTCOME] method=",
+                    "all RPC methods expose a bounded refusal diagnostic, including travel");
+                RequireContains(talk, "? toolOutcome.Code : null",
+                    "dialogue trajectories preserve the typed failure reason");
+                RequireContains(chatWindow, "t.text = GlyphSanitizer.Clean(\"（\" + kind + \":\" + what + \"）\");",
+                    "live and replayed action notices sanitize unsupported glyphs before TMP layout");
                 RequireContains(monthlyEvent,
                     "RequiresCoLocatedMonthlyAction(tool) && !state.SameValidLocation",
                     "monthly event dispatcher rejects remote physical actions before mutation");
@@ -1773,6 +1789,24 @@ namespace JianghuYouling.BackendContractTests
                     "regular followers require native membership rather than a leftover leader field");
                 RequireContains(physicalLocations, "GetPhysicalSceneLocation(target)",
                     "the final physical action check shares the preflight location authority");
+                RequireContains(physicalLocations, "anchor.IsActiveExternalRelationState(32uL)",
+                    "prison coordinates require authoritative imprisonment state");
+                RequireContains(physicalLocations, "GetSettlementByOrgTemplateId(prisonSect)",
+                    "a prisoner without its own map tile resolves to the registered prison");
+                Require(!physicalLocations.Contains(".GetValidLocation()"),
+                    "physical presence must not fall back to travel or adventure map anchors");
+                Require(!physicalLocations.Contains(".SetLocation("),
+                    "scene lookup never repairs positions by teleporting characters");
+                string characterStateDiagnostic = Slice(backend,
+                    "private static SerializableModData WithCharacterState(",
+                    "private static Location GetPhysicalSceneLocation(");
+                foreach (string field in new[] { "raw_area=", "raw_block=", "scene_area=", "scene_block=",
+                    "kidnapper=", "leader=", "prison_sect=", "external_state=", "cross_area=" })
+                    RequireContains(characterStateDiagnostic, field,
+                        "location diagnostics preserve " + field);
+                Require(!characterStateDiagnostic.Contains(".SetLocation(")
+                    && !characterStateDiagnostic.Contains(".SetExternalRelationState("),
+                    "location diagnostics cannot modify character or story ownership state");
                 RequireContains(actorSceneQuery,
                     "DomainManager.Character.GetKidnappedCharacters(actorId).GetCollection()",
                     "actor-scene query includes captives carried outside MapBlockData");

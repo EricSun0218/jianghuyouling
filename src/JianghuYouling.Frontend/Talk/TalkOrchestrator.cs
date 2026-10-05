@@ -4624,7 +4624,9 @@ namespace JianghuYouling
                                     : (localToolSemantic == LocalToolSemantic.Failed ? "failed"
                                         : (localToolSemantic == LocalToolSemantic.Unconfirmed ? "unknown" : "completed")));
                             LlmLog.RecordTrajectory(llmTag, traceRoot.WithRound(round), call?.Name,
-                                trajectoryOutcome, durableDispatch?.OperationId);
+                                trajectoryOutcome, durableDispatch?.OperationId,
+                                durableMutation && toolOutcome != null && !toolOutcome.IsSucceeded
+                                    ? toolOutcome.Code : null);
                             float minDwell = IsRetrievalTool(call.Name) ? 1.2f : ProgressMinDwell;
                             float dwell = Time.unscaledTime - shownAt;
                             if (dwell < minDwell) yield return new WaitForSecondsRealtime(minDwell - dwell);

@@ -28,6 +28,7 @@ namespace JianghuYouling.Effects
     public sealed class MonthlyActionPreflight
     {
         public bool ActorAlive, TargetAlive, ActorAdult, TargetAdult;
+        public bool ActorRestrained;
         public bool Enemy, Spouse, Sworn, Friend, Adored, Mentor;
         public bool AdoptiveParent, AdoptiveChild, CanAdoptiveParent, CanAdoptiveChild;
         public bool ActorAdoresTarget, TargetAdoresActor;
@@ -1285,6 +1286,13 @@ namespace JianghuYouling.Effects
                     bool locationValid = false;
                     resp?.Get("location_valid", out locationValid);
                     ok = ok && locationValid && area >= 0 && block >= 0;
+                    if (!ok)
+                    {
+                        string characterState = null;
+                        resp?.Get("character_state", out characterState);
+                        if (!string.IsNullOrWhiteSpace(characterState))
+                            Debug.Log("[JHYL_CHARACTER_LOCATION_UNAVAILABLE] " + characterState);
+                    }
                     onResult?.Invoke((short)area, (short)block, ok);
                 });
         }
@@ -2237,6 +2245,8 @@ namespace JianghuYouling.Effects
                     if (!ok) { onResult?.Invoke(null); return; }
                     var value = new MonthlyActionPreflight();
                     resp.Get("actor_alive", out value.ActorAlive);
+                    if (!resp.Get("actor_restrained", out value.ActorRestrained))
+                    { onResult?.Invoke(null); return; }
                     resp.Get("target_alive", out value.TargetAlive);
                     resp.Get("actor_adult", out value.ActorAdult);
                     resp.Get("target_adult", out value.TargetAdult);
