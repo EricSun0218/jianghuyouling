@@ -10553,6 +10553,12 @@ namespace JianghuYouling.DevTest
                     (global::JianghuYouling.ConversationNavigationStore.Hide(taiwu, single)
                         && global::JianghuYouling.ConversationNavigationStore.Load(taiwu)
                             .Hidden.Count == 2).ToString(), "True");
+                global::JianghuYouling.ConversationNavigationStore.ResetCacheForWorldExit();
+                AssertEq("以前隐藏的单聊群聊重读磁盘后仍可列入归档",
+                    (global::JianghuYouling.ConversationNavigationStore.Load(taiwu).LoadReliable
+                     && global::JianghuYouling.ConversationNavigationStore.Load(taiwu)
+                         .Hidden.OrderBy(x => x).SequenceEqual(new[] { single, group }.OrderBy(x => x)))
+                    .ToString(), "True");
                 AssertEq("恢复单聊只移除可见性标记",
                     global::JianghuYouling.ConversationNavigationStore.Restore(taiwu, single)
                         .ToString(), "True");
@@ -10566,6 +10572,23 @@ namespace JianghuYouling.DevTest
                     new[] { single, group }.Count(identity =>
                         !global::JianghuYouling.ConversationNavigationStore.Load(taiwu)
                             .Hidden.Contains(identity)).ToString(), "2");
+                const string assistantIdentity = "assistant:1001";
+                AssertEq("灵儿也可进入同一个归档列表",
+                    global::JianghuYouling.ConversationNavigationStore.Hide(taiwu, assistantIdentity)
+                        .ToString(), "True");
+                global::JianghuYouling.ConversationNavigationStore.ResetCacheForWorldExit();
+                AssertEq("灵儿历史隐藏标记可重读并单独还原",
+                    (global::JianghuYouling.ConversationNavigationStore.Load(taiwu).Hidden
+                        .Contains(assistantIdentity)
+                     && global::JianghuYouling.ConversationNavigationStore.Restore(taiwu, assistantIdentity))
+                    .ToString(), "True");
+                global::JianghuYouling.ConversationNavigationStore.ResetCacheForWorldExit();
+                AssertEq("还原后重进存档不会重新出现在归档中",
+                    global::JianghuYouling.ConversationNavigationStore.Load(taiwu).Hidden.Count
+                        .ToString(), "0");
+                AssertEq("隐藏和还原全过程均不改写聊天正文",
+                    System.IO.File.ReadAllBytes(transcriptPath).SequenceEqual(transcriptBeforeHide)
+                        .ToString(), "True");
                 AssertEq("非法身份不会写入隐藏清单",
                     global::JianghuYouling.ConversationNavigationStore.Hide(taiwu,
                         "unknown:1001:2001").ToString(), "False");
@@ -11923,7 +11946,7 @@ namespace JianghuYouling.DevTest
                 "JianghuYouling.Frontend", "UI", "ChatWindow.cs")), System.Text.Encoding.UTF8);
             int hideStart = chat.IndexOf("static void HideNavigationEntry",
                 StringComparison.Ordinal);
-            int hideEnd = chat.IndexOf("static void RestoreNavigationEntry",
+            int hideEnd = chat.IndexOf("static SidebarConversationRow AddSessionRow",
                 hideStart < 0 ? 0 : hideStart, StringComparison.Ordinal);
             string hideMethod = hideStart >= 0 && hideEnd > hideStart
                 ? chat.Substring(hideStart, hideEnd - hideStart) : string.Empty;
@@ -11984,9 +12007,53 @@ namespace JianghuYouling.DevTest
             AssertEq("单聊索引迁移不把全部会话装入运行时缓存",
                 (scan.Contains("ReadConversationIndexSnapshot(")
                     && !scan.Contains("GetConv(")).ToString(), "True");
-            AssertEq("左栏没有已隐藏计数或恢复入口",
-                (!chat.Contains("已隐藏会话") && !chat.Contains("\"已隐藏 \"")
-                    && !chat.Contains("RestoreNavigationEntry")).ToString(), "True");
+            string archive = System.IO.File.ReadAllText(FindRepoFile(System.IO.Path.Combine("src",
+                "JianghuYouling.Frontend", "UI", "ConversationArchiveWindow.cs")), System.Text.Encoding.UTF8);
+            string archiveIntegration = System.IO.File.ReadAllText(FindRepoFile(System.IO.Path.Combine("src",
+                "JianghuYouling.Frontend", "UI", "ChatWindow.Archive.cs")), System.Text.Encoding.UTF8);
+            AssertEq("左栏会话标题旁可打开独立归档弹窗",
+                (chat.Contains("NavigationButton(\"Archive\", \"归档\", headerGo.transform, OpenConversationArchive)")
+                 && archive.Contains("\"JHYL_ConversationArchive\"")).ToString(), "True");
+            AssertEq("归档复用旧隐藏标记且不把不完整索引当作全量列表",
+                (archiveIntegration.Contains("hidden.Contains(entry.Identity)")
+                 && archiveIntegration.Contains("snapshot?.LoadReliable != true")
+                 && archiveIntegration.Contains("!ConversationIndexesReady(taiwuId)"))
+                .ToString(), "True");
+            int restoreStart = archiveIntegration.IndexOf("static bool RestoreArchivedConversation", StringComparison.Ordinal);
+            int restoreEnd = archiveIntegration.IndexOf("static Button NavigationButton", restoreStart, StringComparison.Ordinal);
+            string restoreMethod = archiveIntegration.Substring(restoreStart, restoreEnd - restoreStart);
+            AssertEq("还原成功写盘后才刷新列表且不打开不标已读不动正文",
+                (restoreMethod.IndexOf("if (!ConversationNavigationStore.Restore(entry.TaiwuId, entry.Identity)) return false;",
+                    StringComparison.Ordinal) < restoreMethod.IndexOf("RefreshTabs();", StringComparison.Ordinal)
+                 && !restoreMethod.Contains("OpenNavigationEntry(")
+                 && !restoreMethod.Contains("MarkRead(") && !restoreMethod.Contains("ClearConversation("))
+                .ToString(), "True");
+            AssertEq("全部隐藏后保留中性空窗口并可正常最小化还原",
+                (hideMethod.Contains("_active = null;")
+                 && hideMethod.Contains("SetEmptyConversationVisible(true);")
+                 && chat.Contains("_active == null && _emptyConversationRoot == null")
+                 && chat.Contains("_barRoot.SetActive(!_minimized && !_overlayHidden && IsOpen);")
+                 && archiveIntegration.Contains("PopupRegistry.Register(_emptyConversationRoot, Minimize);"))
+                .ToString(), "True");
+            AssertEq("归档大量会话有分页并且保存全量条目",
+                (archive.Contains("const int PageSize = 24;")
+                 && archive.Contains("_entries.AddRange(entries)")
+                 && archive.Contains("(_entries.Count + PageSize - 1) / PageSize")
+                 && archive.Contains("Math.Min(_entries.Count, (_page + 1) * PageSize)"))
+                .ToString(), "True");
+            AssertEq("旧弹窗旧分页及跨存档归档点击不能误还原",
+                (archive.Contains("session != _session || revision != _renderRevision")
+                 && archive.Contains("_worldId == JianghuYoulingPaths.CurrentWorldId")
+                 && archive.Contains("WorldLifecycle.IsSameWorld(_generation)")
+                 && chat.Contains("ResetConversationArchive();"))
+                .ToString(), "True");
+            AssertEq("归档关闭焦点字形字号与键盘滚动沿用界面规范",
+                (archive.Contains("PopupRegistry.Register(_root, () => Close());")
+                 && archive.Contains("UiFontSizeStore.Bind(label, size);")
+                 && archive.Contains("GlyphSanitizer.Clean(text ?? \"\")")
+                 && archive.Contains("mode = Navigation.Mode.Explicit")
+                 && archive.Contains("ConversationArchiveRowFocus : MonoBehaviour, ISelectHandler"))
+                .ToString(), "True");
 
             string assistant = System.IO.File.ReadAllText(FindRepoFile(System.IO.Path.Combine("src",
                 "JianghuYouling.Frontend", "UI", "AssistantWidget.cs")), System.Text.Encoding.UTF8);
@@ -12026,7 +12093,7 @@ namespace JianghuYouling.DevTest
                 (assistant.Contains("if (_restoreBtn != null && !_restoreBtn.activeSelf) _restoreBtn.SetActive(true);")
                     && assistant.Contains("if (_commissionBtn != null && !_commissionBtn.activeSelf) _commissionBtn.SetActive(true);")
                     && !assistant.Contains("_restoreBtn.SetActive(false);")
-                    && chat.Contains("if (_active == null)")
+                    && chat.Contains("if (_active == null && _emptyConversationRoot == null)")
                     && chat.Contains("OpenAssistant(_font);")).ToString(), "True");
             AssertEq("月聊委三按钮尺寸一致并排且互不重叠",
                 (assistant.Contains("const float DockButtonWidth = 36f;")

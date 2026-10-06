@@ -1144,6 +1144,7 @@ namespace JianghuYouling
                 "· 悔棋:每轮回话都可「重试」或「删除」,只抹掉那一轮沉淀的记忆,已办成的事不回退\n" +
                 "· 配音与生图:NPC 回话可一键配音或生图;火山配音按人物特征和每段台词动态调整音色、语气与语速;生图会把 NPC 与太吾形象合成参考图并结合最近聊天生成场景\n" +
                 "· 多线聊:左侧永久保留每段会话,点名字切换,他们在后台各想各的回话\n" +
+                "· 归档:左侧「会话」旁点「归档」查看本存档所有隐藏的单聊、群聊和灵儿对话;点「还原」移回会话列表;隐藏不会删除聊天、人设或记忆\n" +
                 "· 群聊:每组群聊在左侧单独保存;任何单聊或群聊都能继续加人,候选含所有聊过的人和当前地块人物;远方成员也能说话,当面之事仍须碰面\n" +
                 "· 主动来信:人物会依记忆、关系和处境主动找你,未读会在会话列表标出\n" +
                 "· 人物委托:NPC 可在正常对话中自主提出请求;灵儿按设置的现实时间间隔用纯代码随机生成委托,品级概率随本体世界进度变化且各品级始终有机会;任务只进入当前上下文、不写长期记忆,仍可随时询问完成指导;右侧点「委」查看真实进度,达到或超过目标即可直接领取随机奖励\n" +
@@ -4599,7 +4600,7 @@ namespace JianghuYouling
     /// 内部是「左侧永久会话导航 + 右侧独立内容」——每个已载入会话一个 ChatTab 实例,只显示当前活动内容;
     /// 后台页签的生成协程挂在 TalkEntryHost 上、各写各自实例,故支持同时与多个对象对话(后台并发生成)。
     /// 左侧会同时索引磁盘上的旧单聊与各个群聊；卸载/LRU 只释放 UI，不会让会话从导航消失。</summary>
-    public static class ChatWindow
+    public static partial class ChatWindow
     {
         // ===== 全局:是否展示思考过程(多页签共享;由 Plugin 启动载入、设置页可切)=====
         static bool _showThinking = true;
@@ -5065,6 +5066,8 @@ namespace JianghuYouling
         internal static void ConsumeSourceTabForNativeCombat(ChatTab tab, bool nativeCombatObserved)
         {
             if (tab == null) return;
+            ConversationArchiveWindow.Close(false);
+            SetEmptyConversationVisible(false);
             ReleaseCombatTransition(tab);
             try { tab.InvalidateAllVoice(); tab.InvalidateAllImages(); } catch { }
             _tabs.Remove(tab);
@@ -5267,6 +5270,7 @@ namespace JianghuYouling
         // ---------- 页签激活 / 关闭 / 完成回调 ----------
         static void Activate(ChatTab tab)
         {
+            SetEmptyConversationVisible(false);
             var prev = _active;
             if (prev != null && prev != tab) prev.ConsolidateGroupMemoryNow();   // 切走群聊即固化其记忆:去和某成员单聊立刻能想起群里的事
             _active = tab;
@@ -5307,6 +5311,7 @@ namespace JianghuYouling
         /// 不能走 CloseSelf（它会在离开世界时反而启动画像固化 LLM）。</summary>
         public static void ResetForWorldExit()
         {
+            ResetConversationArchive();
             GroupMemberPicker.CancelForWorldExit();
             TaiwuDirectActionWindow.CloseForWorldExit();
             var copy = new List<ChatTab>(_tabs);
@@ -5529,7 +5534,7 @@ namespace JianghuYouling
         public static void NotifyTabChanged(ChatTab tab) { RefreshTabs(); }
 
         // ---------- 窗口级状态(对外保持原语义,作用于当前活动页签)----------
-        public static bool IsOpen => _active != null && _active.RootActive;
+        public static bool IsOpen => _active != null && _active.RootActive || EmptyConversationVisible;
         public static bool IsAssistantOpen => _active != null && _active.RootActive && _active.AssistantMode;
         public static bool TryGetActiveSingleChatContext(out int taiwuId, out int npcId, out string npcName)
         {
@@ -5540,6 +5545,8 @@ namespace JianghuYouling
         public static void HideForOverlay()
         {
             _overlayHidden = IsOpen;
+            ConversationArchiveWindow.Close(false);
+            SetEmptyConversationVisible(false);
             if (_active != null) _active.SetRootActive(false);
             if (_barRoot != null) _barRoot.SetActive(false);
         }
@@ -5548,24 +5555,28 @@ namespace JianghuYouling
             if (!_overlayHidden) return;
             _overlayHidden = false;
             if (_active != null) _active.SetRootActive(true);
-            if (_barRoot != null && _tabs.Count > 0) _barRoot.SetActive(true);
+            else SetEmptyConversationVisible(true);
+            RefreshTabs();
             _active?.RefreshMonthlyCandidateButton();
         }
         // 关闭窗口 ≠ 关闭会话:只隐藏窗口与页签栏,所有页签连同对话原样留存(下次点 AI对话/千里传音即仍在页签里);
         // 记忆固化推迟到该会话被 LRU 淘汰(或手动 × 关掉)时再做,既不丢对话、也省去每次关窗都触发后台固化 LLM。
         public static void Hide()
         {
+            ConversationArchiveWindow.Close(false);
+            SetEmptyConversationVisible(false);
             if (_active != null) _active.SetRootActive(false);
             if (_barRoot != null) _barRoot.SetActive(false);
         }
 
         static bool _minimized;
         // 当前活动页签的面板 RectTransform(供页签栏跟随面板移动/拖拽)
-        internal static RectTransform ActivePanelRt => _active != null ? _active.PanelRt : null;
+        internal static RectTransform ActivePanelRt => _active != null ? _active.PanelRt : _emptyConversationPanel;
         internal static Vector2 SharedPanelPosition => _sharedPanelPosition;
         internal static void SetSharedPanelPosition(Vector2 position)
         {
             _sharedPanelPosition = position;
+            if (_emptyConversationPanel != null) _emptyConversationPanel.anchoredPosition = position;
             for (int i = 0; i < _tabs.Count; i++)
             {
                 ChatTab tab = _tabs[i];
@@ -5585,6 +5596,8 @@ namespace JianghuYouling
         /// (协程挂在 TalkEntryHost 上、与面板显隐无关,后台照常写各自气泡),还原时所有进度都在。</summary>
         public static void Minimize()
         {
+            ConversationArchiveWindow.Close(false);
+            SetEmptyConversationVisible(false);
             if (_active != null) { _active.ConsolidateGroupMemoryNow(); _active.SetRootActive(false); }   // 最小化群聊也先固化其记忆(免"缩起群聊去单聊、却想不起群里事")
             if (_barRoot != null) _barRoot.SetActive(false);
             _minimized = true;
@@ -5594,7 +5607,7 @@ namespace JianghuYouling
         /// <summary>从最小化还原:重新显示活动页签 + 页签栏,隐去「展开」钮。</summary>
         public static void RestoreFromMinimize()
         {
-            if (_active == null)
+            if (_active == null && _emptyConversationRoot == null)
             {
                 OpenAssistant(_font);
                 return;
@@ -5602,7 +5615,8 @@ namespace JianghuYouling
             _minimized = false;
             try { AssistantWidget.SetMinimized(false); } catch { }
             if (_active != null) _active.SetRootActive(true);
-            if (_barRoot != null && _tabs.Count > 0) _barRoot.SetActive(true);
+            else SetEmptyConversationVisible(true);
+            RefreshTabs();
         }
 
         // ---------- 对话协程 / 外部用:作用于当前活动页签 ----------
@@ -5692,8 +5706,13 @@ namespace JianghuYouling
                 new Color(0.94f, 0.92f, 0.84f, 1f), 21f, TextAlignmentOptions.Left);
             var headerTextRt = header.rectTransform;
             headerTextRt.anchorMin = Vector2.zero; headerTextRt.anchorMax = Vector2.one;
-            headerTextRt.offsetMin = new Vector2(16, 0); headerTextRt.offsetMax = new Vector2(-8, 0);
+            headerTextRt.offsetMin = new Vector2(16, 0); headerTextRt.offsetMax = new Vector2(-100, 0);
             header.raycastTarget = false;
+            Button archive = NavigationButton("Archive", "归档", headerGo.transform, OpenConversationArchive);
+            RectTransform archiveRect = archive.GetComponent<RectTransform>();
+            archiveRect.anchorMin = archiveRect.anchorMax = archiveRect.pivot = new Vector2(1, 0.5f);
+            archiveRect.anchoredPosition = new Vector2(-10, 0);
+            archiveRect.sizeDelta = new Vector2(80, 36);
 
             var scrollGo = new GameObject("Sessions", typeof(RectTransform), typeof(Image), typeof(ScrollRect));
             scrollGo.transform.SetParent(panelGo.transform, false);
@@ -5768,8 +5787,8 @@ namespace JianghuYouling
                     _visibleNavigation.Add(entry);
             }
             RefreshNavigationWindow(true);
-            _barRoot.SetActive(_visibleNavigation.Count > 0 && !_minimized && !_overlayHidden
-                && _active != null && _active.RootActive);
+            _barRoot.SetActive(!_minimized && !_overlayHidden && IsOpen);
+            RefreshArchiveContents(taiwuId, entries);
         }
 
         static GameObject NavigationSpacer(string name, Transform parent)
@@ -6587,11 +6606,10 @@ namespace JianghuYouling
                 if (replacement != null) OpenNavigationEntry(replacement);
                 else
                 {
-                    // No visible conversation remains. Keep the sidebar recovery entry available,
-                    // but clear the active pointer so overlay/minimize restoration cannot reopen the
-                    // just-hidden right panel behind the player's back.
+                    // No visible conversation remains. Keep a neutral shell and the archive entry,
+                    // without reopening the just-hidden conversation or revealing the assistant.
                     _active = null;
-                    if (_barRoot != null) _barRoot.SetActive(false);
+                    SetEmptyConversationVisible(true);
                 }
             }
             RefreshTabs();
