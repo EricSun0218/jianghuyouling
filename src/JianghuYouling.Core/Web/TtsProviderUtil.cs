@@ -4,6 +4,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
+using JianghuYouling.Core.Text;
 using Newtonsoft.Json.Linq;
 
 namespace JianghuYouling.Core.Web
@@ -27,6 +28,14 @@ namespace JianghuYouling.Core.Web
         public const int MaxSpeechCharacters = 6000;
         public const int MaxSpeechChunks = 10;
         public const int SpeechSynthesisDeadlineMilliseconds = 120 * 1000;
+
+        /// <summary>Select speech before provider splitting/budgets; full reading keeps the existing cleanup.</summary>
+        public static string PrepareSpeechText(string text, bool dialogueOnly)
+        {
+            if (dialogueOnly) text = DialogueText.ExtractDialogue(text);
+            if (string.IsNullOrEmpty(text)) return text;
+            return text.Replace("*", "").Replace("#", "").Replace("`", "").Replace("　", " ").Trim();
+        }
 
         /// <summary>Tracks only provider synthesis time; audio playback does not consume the network deadline.</summary>
         public sealed class TtsSynthesisBudget

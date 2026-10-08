@@ -2554,6 +2554,15 @@ namespace JianghuYouling
         void GenRoundVoice(Round r)
         {
             if (r == null || r.voiceGen || string.IsNullOrWhiteSpace(r.replyText)) return;
+            // A narration-only click is a no-op even without provider credentials. Keep the
+            // central player guard too, so every entry uses the same saved mode and selector.
+            if (TtsSettings.TryLoad(out var speechSettings) && speechSettings.DialogueOnly
+                && !TtsProviderUtil.ContainsReadableSpeech(
+                    TtsProviderUtil.PrepareSpeechText(r.replyText, speechSettings.DialogueOnly)))
+            {
+                AddSysNotice("（语音：" + VoicePlayer.NoDialogueNotice + "）");
+                return;
+            }
             // 未配置语音接口:不静默失败,直接弹设置页让玩家去第一页填「语音接口」(可选项,不借用主 key)
             if (!TtsConfig.IsConfigured)
             {
@@ -3727,39 +3736,7 @@ namespace JianghuYouling
         // 下一段增量到来时会从原文重新格式化，不会把后续旁白永久染色。
         string FormatNpcVisibleText(string text)
         {
-            text = text ?? string.Empty;
-            if (text.Length == 0) return text;
-
-            var output = new StringBuilder(text.Length + 96);
-            var closers = new Stack<char>();
-            output.Append("<color=").Append(NpcNarrationColorTag).Append('>');
-            for (int i = 0; i < text.Length; i++)
-            {
-                char ch = text[i];
-                bool asciiQuote = ch == '"';
-                bool openingAsciiQuote = asciiQuote
-                    && (closers.Count == 0 || closers.Peek() != '"');
-                if (ch == '「' || ch == '『' || ch == '“' || openingAsciiQuote)
-                {
-                    if (closers.Count == 0)
-                        output.Append("</color><color=").Append(NpcDialogueColorTag).Append('>');
-                    closers.Push(ch == '「' ? '」' : ch == '『' ? '』' : ch == '“' ? '”' : '"');
-                    output.Append(ch);
-                    continue;
-                }
-
-                output.Append(ch);
-                if (closers.Count > 0 && ch == closers.Peek())
-                {
-                    closers.Pop();
-                    if (closers.Count == 0)
-                        output.Append("</color><color=").Append(NpcNarrationColorTag).Append('>');
-                }
-            }
-            if (closers.Count > 0)
-                output.Append("</color><color=").Append(NpcNarrationColorTag).Append('>');
-            output.Append("</color>");
-            return output.ToString();
+            return DialogueText.Colorize(text, NpcNarrationColorTag, NpcDialogueColorTag);
         }
 
         // 新版消息在正文下方低调展示发生年月与说话者所在地。联络方式虽随记录保存，

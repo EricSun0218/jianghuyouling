@@ -25,6 +25,7 @@
     <Compile Include="..\..\src\JianghuYouling.Frontend\Game\DurableSettingsStore.cs" Link="Production\DurableSettingsStore.cs" />
     <Compile Include="..\..\src\JianghuYouling.Frontend\Game\ThinkingPromptRuleStore.cs" Link="Production\ThinkingPromptRuleStore.cs" />
     <Compile Include="..\..\src\JianghuYouling.Frontend\Game\ImageGenerationConfig.cs" Link="Production\ImageGenerationConfig.cs" />
+    <Compile Include="..\..\src\JianghuYouling.Frontend\Game\TtsSettings.cs" Link="Production\TtsSettings.cs" />
     <Compile Include="..\..\src\JianghuYouling.Frontend\Game\AssistantEnabledStore.cs" Link="Production\AssistantEnabledStore.cs" />
     <Compile Include="..\..\src\JianghuYouling.Frontend\Game\AssistantProactiveStore.cs" Link="Production\AssistantProactiveStore.cs" />
     <Compile Include="..\..\src\JianghuYouling.Frontend\Game\NpcProactiveChatStore.cs" Link="Production\NpcProactiveChatStore.cs" />

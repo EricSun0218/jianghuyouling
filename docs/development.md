@@ -52,7 +52,7 @@ pwsh -File tools/regression-checks.ps1
 
 ## 发布包
 
-Release 构建完成后，`tools/prepare-test-workshop.ps1 -ReleaseVersion 0.34.0.28`
+Release 构建完成后，`tools/prepare-test-workshop.ps1 -ReleaseVersion 0.34.0.29`
 创建仅含声明文件的测试工坊候选包；创建候选包不会上传。
 包中包括本项目三个 DLL、Mod 清单、展示资源及许可文件。
 不要加入游戏程序集、用户配置、存档或日志。

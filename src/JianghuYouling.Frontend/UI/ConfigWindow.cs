@@ -31,6 +31,7 @@ namespace JianghuYouling
         static GameObject _asstPersonaInputGo;
         static Button _saveBtn, _testBtn, _profilePrevBtn, _profileNextBtn, _profileActivateBtn, _profileSaveBtn, _profileDeleteBtn, _diffBtn, _streamBtn, _replyLenBtn, _fontSizeBtn, _ghostwriteLenBtn, _ghostwriteLearningBtn, _thinkBtn, _aiEventBtn, _companionMonthlyBtn, _monthlyPopupBtn, _monthlyCandidateManagerBtn, _wbStructuredBtn = null, _wbResetBtn = null, _personaResetBtn, _asstEnabledBtn, _asstFreqBtn, _asstCommissionIntervalBtn, _asstFaceResetBtn, _groupRoundsBtn, _npcProactiveEnabledBtn, _npcProactiveFreqBtn, _imageWatermarkBtn;
         static Button _thinkingPromptBtn;
+        static Button _ttsDialogueOnlyBtn;
         static Button _economyPresetBtn, _balancedPresetBtn, _bestExperiencePresetBtn;
         static GameObject[] _panes;
         static Image[] _navImgs;
@@ -61,6 +62,7 @@ namespace JianghuYouling
         static bool _imageWatermark;
         static bool _ttsMigratingLegacyDefault;
         static bool _ttsMigratingCrossProviderKey;
+        static bool _ttsDialogueOnly;
         static TMP_FontAsset _font;
         static bool _testing;
         static CancellationTokenSource _testCancellation;
@@ -236,10 +238,13 @@ namespace JianghuYouling
             // 默认值时也展示新默认，但绝不把旧服务商的密钥带给火山接口。
             _ttsMigratingLegacyDefault = false;
             _ttsMigratingCrossProviderKey = false;
+            _ttsDialogueOnly = false;
             try
             {
+                TtsSettings ttsSettings = TtsSettings.Load();
+                _ttsDialogueOnly = ttsSettings.DialogueOnly;
                 var (vp, vb, vk) = TtsConfig.LoadRaw();
-                string tmodel = TtsSettings.Load().Model ?? "";
+                string tmodel = ttsSettings.Model ?? "";
                 _ttsMigratingCrossProviderKey = IsLegacyMiniMaxDefault(vp, vb, tmodel);
                 _ttsMigratingLegacyDefault = _ttsMigratingCrossProviderKey
                     || IsLegacySeedAudioDefault(vp, vb, tmodel);
@@ -250,6 +255,8 @@ namespace JianghuYouling
                     ? DefaultTtsModel : tmodel;
             }
             catch { }
+
+            SetTtsDialogueOnlyLabel();
 
             try
             {
@@ -1171,6 +1178,7 @@ namespace JianghuYouling
                     ts.Emotion = "";
                 }
                 ts.Model = ttsModelText;
+                ts.DialogueOnly = _ttsDialogueOnly;
                 if (!ts.Save()) { abort("(语音参数保存失败:磁盘写入或读回校验失败)"); return; }
                 _ttsMigratingLegacyDefault = false;
                 _ttsMigratingCrossProviderKey = false;
@@ -1715,7 +1723,7 @@ namespace JianghuYouling
                 _wbStructuredBtn, _asstEnabledBtn, _asstFreqBtn,
                 _asstFaceResetBtn, _groupRoundsBtn, _npcProactiveEnabledBtn, _npcProactiveFreqBtn,
                 _economyPresetBtn, _balancedPresetBtn,
-                 _bestExperiencePresetBtn, _imageWatermarkBtn, _thinkingPromptBtn })
+                 _bestExperiencePresetBtn, _imageWatermarkBtn, _thinkingPromptBtn, _ttsDialogueOnlyBtn })
                 if (button != null) button.interactable = enabled;
         }
 
@@ -1809,6 +1817,12 @@ namespace JianghuYouling
             var cb = NewButton("CloseBottom", panel.transform, "关闭", 20, out var cbBtn);
             Anchor(cb.GetComponent<RectTransform>(), new Vector2(1, 0), new Vector2(1, 0), new Vector2(-176, 12), new Vector2(-16, 52));
             cbBtn.onClick.AddListener(Hide);
+            _ttsDialogueOnlyBtn.navigation = new Navigation
+            {
+                mode = Navigation.Mode.Explicit,
+                selectOnUp = _ttsModel, selectOnDown = _saveBtn,
+                selectOnLeft = _navImgs[2].GetComponent<Button>(), selectOnRight = _saveBtn,
+            };
         }
 
         // —— 模型页:baseUrl / apiKey / model + 推荐说明 ——
@@ -1888,15 +1902,38 @@ namespace JianghuYouling
             _ttsKey = BuildField(pane.transform, "语音密钥 apiKey", top, true); top -= rowH;
             _ttsModel = BuildField(pane.transform, "语音资源模型（默认 seed-tts-2.0）", top, false); top -= rowH;
 
+            var contentLabel = NewText("SpeechContentLabel", pane.transform, 17, TextAlignmentOptions.Left);
+            Anchor(contentLabel.rectTransform, new Vector2(0, 1), new Vector2(1, 1),
+                new Vector2(4, top - 42), new Vector2(-180, top - 8));
+            contentLabel.text = "朗读内容（默认全文）";
+            contentLabel.color = new Color(0.80f, 0.78f, 0.70f, 1f);
+            var contentGo = NewButton("SpeechContent", pane.transform, "全文", 18, out _ttsDialogueOnlyBtn);
+            Anchor(contentGo.GetComponent<RectTransform>(), Vector2.one, Vector2.one,
+                new Vector2(-164, top - 42), new Vector2(-4, top - 8));
+            var contentColors = _ttsDialogueOnlyBtn.colors;
+            contentColors.selectedColor = contentColors.highlightedColor = new Color(1.3f, 1.3f, 1.2f, 1f);
+            _ttsDialogueOnlyBtn.colors = contentColors;
+            _ttsDialogueOnlyBtn.onClick.AddListener(() =>
+            {
+                _ttsDialogueOnly = !_ttsDialogueOnly;
+                SetTtsDialogueOnlyLabel();
+                SetStatus("朗读内容已选择「" + (_ttsDialogueOnly ? "仅说话" : "全文") + "」，点击保存后生效。", false);
+            });
+            top -= rowH;
+
             var note = NewText("VoiceNote", pane.transform, 13, TextAlignmentOptions.TopLeft);
-            Anchor(note.rectTransform, new Vector2(0, 1), new Vector2(1, 1), new Vector2(4, top - 150), new Vector2(-4, top - 4));
+            Anchor(note.rectTransform, new Vector2(0, 1), new Vector2(1, 1), new Vector2(4, top - 210), new Vector2(-4, top - 4));
             note.enableWordWrapping = true; note.color = new Color(0.62f, 0.66f, 0.60f, 0.95f);
             note.text =
                 "语音朗读是【可选】功能:不填密钥就不启用，聊天照常使用。\n" +
+                "“全文”沿用原有朗读；“仅说话”只读聊天中以说话颜色显示的内容，跳过旁白。单聊、群聊与灵儿统一生效；没有说话内容时只提示、不合成语音。选择后需点击保存。\n" +
                 "默认火山 Seed-TTS 2.0：V3 接口与 seed-tts-2.0 已填好，只需填写新版豆包语音控制台的 API Key。会按人物性别、年龄和性格选择 2.0 音色，并让语气、重音和语速随台词动态变化。\n" +
                 "仍支持 MiniMax、OpenAI 兼容 /audio/speech 与百炼/通义非实时 Qwen TTS；切换时填写对应接口和模型。";
             return pane;
         }
+
+        static void SetTtsDialogueOnlyLabel()
+            => SetButtonText(_ttsDialogueOnlyBtn, _ttsDialogueOnly ? "仅说话" : "全文");
 
         // —— 生图页:独立凭据；云端协议与本机 ComfyUI 均由 main 自己适配 ——
         static GameObject BuildImagePane(Transform parent)

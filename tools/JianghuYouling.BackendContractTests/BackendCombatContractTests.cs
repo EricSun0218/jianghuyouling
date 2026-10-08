@@ -736,8 +736,8 @@ namespace JianghuYouling.BackendContractTests
                 RequireContains(chatWindow, "const string NpcNarrationColorTag = \"#D8C58CD2\";",
                     "NPC narration uses a quieter translucent warm-gold accent");
                 RequireContains(chatWindow,
-                    "output.Append(\"</color><color=\").Append(NpcDialogueColorTag).Append('>');",
-                    "NPC spoken dialogue changes color without changing font weight");
+                    "DialogueText.Colorize(text, NpcNarrationColorTag, NpcDialogueColorTag)",
+                    "NPC spoken dialogue uses the shared speech boundary without changing font weight");
                 Require(chatWindow.IndexOf("if (_assistantMode || text.Length == 0) return text;", StringComparison.Ordinal) < 0,
                     "assistant replies share the normal NPC narration and dialogue color formatter");
                 Require(chatWindow.IndexOf("<b><color=", StringComparison.Ordinal) < 0,

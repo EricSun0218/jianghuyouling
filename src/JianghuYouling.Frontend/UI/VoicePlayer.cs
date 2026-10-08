@@ -20,6 +20,7 @@ namespace JianghuYouling
         const float MaxCacheSeconds = 15f * 60f;
         const int MaxCacheEntries = 96;
         const float SeedTts2GameRelativeVolumeBoost = 1.0f;
+        internal const string NoDialogueNotice = "本条没有可朗读的说话内容（当前选择：仅说话）";
 
         sealed class CacheEntry
         {
@@ -175,7 +176,17 @@ namespace JianghuYouling
 
             try
             {
-                text = CleanForTts(text);
+                if (!TtsSettings.TryLoad(out var st))
+                {
+                    onState?.Invoke("语音参数文件损坏且无法从备份恢复");
+                    yield break;
+                }
+                text = TtsProviderUtil.PrepareSpeechText(text, st.DialogueOnly);
+                if (st.DialogueOnly && !TtsProviderUtil.ContainsReadableSpeech(text))
+                {
+                    onState?.Invoke(NoDialogueNotice);
+                    yield break;
+                }
                 if (string.IsNullOrWhiteSpace(text)) yield break;
 
                 var (provider, baseUrl, apiKey, model) = TtsConfig.Resolve();
@@ -205,11 +216,6 @@ namespace JianghuYouling
                     }
                 }
 
-                if (!TtsSettings.TryLoad(out var st))
-                {
-                    onState?.Invoke("语音参数文件损坏且无法从备份恢复");
-                    yield break;
-                }
                 string voice = !string.IsNullOrWhiteSpace(st.Voice)
                     ? st.Voice
                     : TtsConfig.PickVoice(provider, isAssistant, gender, age, feats, behavior);
@@ -252,7 +258,7 @@ namespace JianghuYouling
                 {
                     yield return SpeakParallelCo(generation, cancellation, provider, baseUrl, apiKey,
                         cacheRevision, useModel, voice, performanceProfile, speed, emotion,
-                        synthesisVolume, st.Vol, st.Pitch, st.Dynamic, seedTts2, chunks, onState);
+                        synthesisVolume, st.Vol, st.Pitch, st.Dynamic, st.DialogueOnly, seedTts2, chunks, onState);
                     if (IsCurrent(generation, cancellation))
                         Debug.Log("[江湖有灵] 配音：全部播放结束");
                     yield break;
@@ -271,7 +277,7 @@ namespace JianghuYouling
                         chunkEmotion = string.IsNullOrEmpty(st.Emotion) ? prosody.emotion : st.Emotion;
                     }
                     string chunkPerformanceProfile = performanceProfile +
-                        (TtsProviderUtil.IsDialogueSpeechChunk(chunk)
+                        (st.DialogueOnly || TtsProviderUtil.IsDialogueSpeechChunk(chunk)
                             ? "；本段是人物对白，像当面说话一样自然"
                             : "；本段是旁白叙述，讲述自然克制，不使用播音腔");
                     string cacheKey = BuildCacheKey(provider, baseUrl, apiKey, cacheRevision, useModel, voice,
@@ -432,7 +438,7 @@ namespace JianghuYouling
         static IEnumerator SpeakParallelCo(long generation, CancellationTokenSource cancellation,
             string provider, string baseUrl, string apiKey, long cacheRevision, string model,
             string voice, string performanceProfile, float speed, string emotion,
-            float synthesisVolume, float configuredVolume, int pitch, bool dynamic,
+            float synthesisVolume, float configuredVolume, int pitch, bool dynamic, bool dialogueOnly,
             bool seedTts2, IReadOnlyList<string> chunks, Action<string> onState)
         {
             var work = new List<SpeechChunkWork>(chunks.Count);
@@ -453,7 +459,7 @@ namespace JianghuYouling
                         chunkEmotion = string.IsNullOrEmpty(emotion) ? prosody.emotion : emotion;
                     }
                     string chunkPerformanceProfile = performanceProfile +
-                        (TtsProviderUtil.IsDialogueSpeechChunk(chunk)
+                        (dialogueOnly || TtsProviderUtil.IsDialogueSpeechChunk(chunk)
                             ? "；本段是人物对白，像当面说话一样自然"
                             : "；本段是旁白叙述，讲述自然克制，不使用播音腔");
                     string cacheKey = BuildCacheKey(provider, baseUrl, apiKey, cacheRevision, model,
@@ -812,12 +818,6 @@ namespace JianghuYouling
             string msg = e.GetType().Name;
             if (root != null && root != e) msg += " | inner=" + root.GetType().Name;
             return msg;
-        }
-
-        static string CleanForTts(string value)
-        {
-            if (string.IsNullOrEmpty(value)) return value;
-            return value.Replace("*", "").Replace("#", "").Replace("`", "").Replace("　", " ").Trim();
         }
 
         static bool IsNoReadableTextError(string error)

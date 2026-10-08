@@ -5937,6 +5937,7 @@ namespace JianghuYouling.DevTest
 
         private static void TestTtsProviderSupport()
         {
+            DialogueSpeechTests.Run();
             Console.WriteLine("=== TTS provider / 分块 / 音频与 URL 安全边界自测 ===");
             AssertEq("MiniMax provider", TtsProviderUtil.ResolveProvider("https://api.minimaxi.com/v1", "speech-02-turbo"), "minimax");
             AssertEq("OpenAI provider", TtsProviderUtil.ResolveProvider("https://api.openai.com/v1", "tts-1"), "openai");

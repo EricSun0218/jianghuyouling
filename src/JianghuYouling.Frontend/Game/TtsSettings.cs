@@ -17,6 +17,7 @@ namespace JianghuYouling
         public string Emotion = "";
         public string Model = "";
         public bool Dynamic = true;
+        public bool DialogueOnly = false;
 
         static string PathFor() => Path.Combine(JianghuYoulingPaths.Settings, "tts_params.json");
 
@@ -50,6 +51,7 @@ namespace JianghuYouling
                 ["emotion"] = normalizedEmotion,
                 ["model"] = Model ?? "",
                 ["dynamic"] = Dynamic,
+                ["dialogueOnly"] = DialogueOnly,
             };
             string json = document.ToString(Formatting.None);
             return DurableFileStore.TryWriteTextAtomic(PathFor(), json, MaxFileBytes, IsValidDocument);
@@ -59,7 +61,7 @@ namespace JianghuYouling
         {
             settings = null;
             if (!DurableFileStore.TryParseJsonStrict(json, 8, out JToken root) || !(root is JObject o) ||
-                !DurableFileStore.HasOnlyProperties(o, "voice", "speed", "vol", "pitch", "emotion", "model", "dynamic"))
+                !DurableFileStore.HasOnlyProperties(o, "voice", "speed", "vol", "pitch", "emotion", "model", "dynamic", "dialogueOnly"))
                 return false;
             if (!TryBoundedString(o["voice"], 256, out string voice) ||
                 !TryBoundedString(o["emotion"], 32, out string emotion) ||
@@ -68,6 +70,7 @@ namespace JianghuYouling
                 !TryFloat(o["vol"], 0f, 2f, 1f, out float vol) ||
                 !TryInt(o["pitch"], -12, 12, 0, out int pitch) ||
                 !TryBool(o["dynamic"], true, out bool dynamic) ||
+                !TryBool(o["dialogueOnly"], false, out bool dialogueOnly) ||
                 !IsAllowedEmotion(emotion)) return false;
 
             settings = new TtsSettings
@@ -79,6 +82,7 @@ namespace JianghuYouling
                 Emotion = (emotion ?? "").Trim().ToLowerInvariant(),
                 Model = model,
                 Dynamic = dynamic,
+                DialogueOnly = dialogueOnly,
             };
             return true;
         }
