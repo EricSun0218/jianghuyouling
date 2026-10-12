@@ -945,8 +945,50 @@ namespace JianghuYouling.Effects
                 });
         }
 
+        /// <summary>只读核验当前存档中的人物归属，不创建副本或修改游戏存档。</summary>
+        public static void QueryCharacterProxyIdentities(IList<int> ids,
+            Action<List<JianghuYouling.Core.Behavior.CharacterProxyIdentity>, string> onDone)
+        {
+            if (ids == null || ids.Count == 0
+                || ids.Count > JianghuYouling.Core.Behavior.CharacterProxyIdentity.MaxQueryBatch)
+            { onDone?.Invoke(null, "人物身份查询数量无效"); return; }
+            int[] requested = new List<int>(ids).ToArray();
+            CallGm("character_proxy_identities", d => d.Set("ids", string.Join(",", requested)), response =>
+            {
+                bool ok = false;
+                int count = 0;
+                string message = null;
+                response?.Get("success", out ok);
+                response?.Get("count", out count);
+                response?.Get("message", out message);
+                if (!ok || count != requested.Length)
+                { onDone?.Invoke(null, message ?? "人物身份查询未返回完整结果"); return; }
+                var results = new List<JianghuYouling.Core.Behavior.CharacterProxyIdentity>();
+                for (int index = 0; index < count; index++)
+                {
+                    SerializableModData row;
+                    var identity = new JianghuYouling.Core.Behavior.CharacterProxyIdentity();
+                    int template;
+                    if (!response.Get("identity_" + index, out row) || row == null
+                        || !row.Get("requested", out identity.RequestedId)
+                        || identity.RequestedId != requested[index]
+                        || !row.Get("original", out identity.OriginalId)
+                        || !row.Get("resolved", out identity.ResolvedId)
+                        || !row.Get("template", out template) || template < -1 || template > short.MaxValue
+                        || !row.Get("proxy", out identity.IsProxy)
+                        || !row.Get("prepare", out identity.RequiresPreparation)
+                        || !row.Get("dead", out identity.IsDead)
+                        || !row.Get("error", out identity.Error))
+                    { onDone?.Invoke(null, "人物身份查询结果不完整"); return; }
+                    identity.DisplayTemplateId = (short)template;
+                    results.Add(identity);
+                }
+                onDone?.Invoke(results, null);
+            });
+        }
+
         /// <summary>
-        /// 首次打开 AI 对话前解析人物身份。普通人物原样返回；固定模板人物由后端建立或复用
+        /// 首次实际发言前解析人物身份。普通人物原样返回；固定模板人物由后端建立或复用
         /// 永久独立副本。回调中的 original/resolved 用于前端执行一次性聊天与记忆迁移。
         /// </summary>
         public static void EnsureCharacterProxy(int npcId,

@@ -303,7 +303,7 @@ namespace JianghuYouling.Core.Memory
         }
 
         /// <summary>淘汰:超量时保留重要性高 + 近期被召回的,控制体量。上限放宽——记忆是珍贵资产,宁多勿删。</summary>
-        public int Prune(long now, int maxKeep = 2000)
+        public int Prune(long now, int maxKeep = 2000, MemoryEntry retainedEntry = null)
         {
             var before = _entries.Count;
             if (before > maxKeep)
@@ -313,18 +313,25 @@ namespace JianghuYouling.Core.Memory
                 // Core is immune to time decay, not to storage capacity. A hostile or
                 // corrupted provider can otherwise label every entry importance=9 and
                 // defeat pruning forever. Keep a bounded deterministic core tier first.
-                var core = _entries.Where(e => e != null && e.IsCore)
+                // A durable projection must not evict the very source it is committing. Reserve
+                // one slot for that entry for this prune only; do not promote it to permanent core.
+                bool retain = maxKeep > 0 && retainedEntry != null && _entries.Contains(retainedEntry);
+                int available = Math.Max(0, maxKeep - (retain ? 1 : 0));
+                var core = _entries.Where(e => e != null && e.IsCore
+                        && (!retain || !ReferenceEquals(e, retainedEntry)))
                     .OrderByDescending(MemoryRanker.CoreRetentionPriority)
                     .ThenByDescending(e => MemoryRanker.PromoteScore(e, now))
                     .ThenByDescending(e => e.WorldDate)
                     .ThenBy(e => e.Id ?? string.Empty, StringComparer.Ordinal)
-                    .Take(Math.Max(0, maxKeep))
+                    .Take(available)
                     .ToList();
-                var rest = _entries.Where(e => e != null && !e.IsCore)
+                var rest = _entries.Where(e => e != null && !e.IsCore
+                        && (!retain || !ReferenceEquals(e, retainedEntry)))
                     .OrderByDescending(e => MemoryRanker.PromoteScore(e, now))
-                    .Take(Math.Max(0, maxKeep - core.Count))
+                    .Take(Math.Max(0, available - core.Count))
                     .ToList();
                 _entries.Clear();
+                if (retain) _entries.Add(retainedEntry);
                 _entries.AddRange(core);
                 _entries.AddRange(rest);
                 foreach (var e in _entries) if (e != null && !string.IsNullOrEmpty(e.Id)) oldIds.Remove(e.Id);

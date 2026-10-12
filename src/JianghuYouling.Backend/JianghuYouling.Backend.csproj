@@ -23,6 +23,7 @@
     <Compile Include="..\JianghuYouling.Core\Behavior\MonthlyDangerActionPolicy.cs" Link="Shared\MonthlyDangerActionPolicy.cs" />
     <Compile Include="..\JianghuYouling.Core\Behavior\TaiwuScenePresencePolicy.cs" Link="Shared\TaiwuScenePresencePolicy.cs" />
     <Compile Include="..\JianghuYouling.Core\Behavior\CharacterSceneAnchorResolver.cs" Link="Shared\CharacterSceneAnchorResolver.cs" />
+    <Compile Include="..\JianghuYouling.Core\Behavior\CharacterProxyIdentity.cs" Link="Shared\CharacterProxyIdentity.cs" />
     <Compile Include="..\JianghuYouling.Core\Commission\CommissionRewardPolicy.cs" Link="Shared\CommissionRewardPolicy.cs" />
     <Compile Include="..\JianghuYouling.Core\Commission\CommissionProgressPolicy.cs" Link="Shared\CommissionProgressPolicy.cs" />
   </ItemGroup>

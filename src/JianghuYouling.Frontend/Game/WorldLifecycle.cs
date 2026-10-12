@@ -157,6 +157,7 @@ namespace JianghuYouling
             OperationRpcClient.ReplayAcknowledgementOutbox();
             TalkOrchestrator.RecoverWorldPendingConversations();
             GroupChatOrchestrator.RecoverWorldTransactions();
+            CharacterProxyIdentityService.Prewarm(taiwuId);
             ChatWindow.PrewarmConversationIndexes(taiwuId);
         }
 

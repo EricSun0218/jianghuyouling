@@ -130,6 +130,7 @@ namespace JianghuYouling
 
             _handler = OnMonthStateChange;
             GEvent.Add(EEvents.OnAdvancingMonthStateChange, _handler);
+            GEvent.Add(EEvents.OnSavingWorldStateChange, _handler);
             Debug.Log("[江湖有灵] 过月结算已挂载(基线日期=" + _lastProcessedDate + ")");
         }
 
@@ -137,6 +138,7 @@ namespace JianghuYouling
         {
             if (!_inited) return;
             try { if (_handler != null) GEvent.Remove(EEvents.OnAdvancingMonthStateChange, _handler); } catch { }
+            try { if (_handler != null) GEvent.Remove(EEvents.OnSavingWorldStateChange, _handler); } catch { }
             _handler = null;
             _inited = false;
             _travelStopIssued = false;
@@ -214,6 +216,22 @@ namespace JianghuYouling
             catch { return false; }
         }
 
+        internal static bool IsSavingWorldForMonthlyWork()
+        {
+            try
+            {
+                var bgd = SingletonObject.getInstance<BasicGameData>();
+                return bgd == null || bgd.SavingWorld;
+            }
+            catch { return true; }
+        }
+
+        internal static System.Collections.IEnumerator WaitForNativeSave(int generation, uint worldId)
+            => MonthlyNativeSaveBarrier.Wait(
+                () => DigestWorldIsCurrent(generation, worldId),
+                IsSavingWorldForMonthlyWork, IsAdvancingMonthForMonthlyWork,
+                () => Debug.Log("[JHYL_MONTHLY_SAVE_DEFERRED] waiting_for_native_save=true"));
+
         private static string CurrentMonthlyStopReason()
         {
             if (IsAdvancingMonthForMonthlyWork()) return NativeAdvanceStopReason;
@@ -284,6 +302,9 @@ namespace JianghuYouling
                     return;
                 }
                 _monthAdvanceStopIssued = false;
+                // AdvancingMonthState returns to zero while SavingWorld is still true.
+                // The save-end notification will retry this date; do not consume it here.
+                if (bgd.SavingWorld) return;
                 int taiwuId = bgd.TaiwuCharId;
                 int date = bgd.CurrDate;
                 if (taiwuId <= 0) return;
@@ -348,6 +369,7 @@ namespace JianghuYouling
         {
             if (_processingDate >= 0 || DigestQueue.Count == 0 || !_worldBaselineReady
                 || !WorldLifecycle.HasWorldIdentity) return;
+            if (IsAdvancingMonthForMonthlyWork() || IsSavingWorldForMonthlyWork()) return;
             var host = DigestHost();
             if (host == null) return;
             while (DigestQueue.Count > 0 && DigestQueue[0].Date <= _lastProcessedDate)
@@ -391,6 +413,8 @@ namespace JianghuYouling
             int generation = WorldLifecycle.Generation;
             uint worldId = WorldLifecycle.WorldId;
             string capturedDigestStatePath = DigestStatePath();
+            yield return WaitForNativeSave(generation, worldId);
+            if (!DigestWorldIsCurrent(generation, worldId)) yield break;
             MonthlyAgentRequestBudget.Begin(worldId, taiwuId, date);
             MonthlyChronicleNoticeStore.BeginGeneration(taiwuId, date);
             if (IsAdvancingMonthForMonthlyWork())
@@ -403,6 +427,15 @@ namespace JianghuYouling
                 && DigestWorldIsCurrent(generation, worldId)
                 && !IsAdvancingMonthForMonthlyWork())
             {
+                yield return WaitForNativeSave(generation, worldId);
+                if (!DigestWorldIsCurrent(generation, worldId)) yield break;
+                if (IsAdvancingMonthForMonthlyWork())
+                {
+                    RecordStoppedDigest(taiwuId, date, AiEventStore.Load(), CompanionMonthlyStore.Load(),
+                        generation, worldId, NativeAdvanceStopReason);
+                    producedResult = true;
+                    break;
+                }
                 bool finished = false;
                 yield return RunDigest(taiwuId, date, useful => { producedResult = useful; finished = true; });
                 // Digest hosts survive scene changes. Never consume an old world's

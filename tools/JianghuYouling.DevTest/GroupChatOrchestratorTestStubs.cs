@@ -191,10 +191,15 @@ namespace JianghuYouling
     public class TalkOrchestrator
     {
         public static readonly List<int> ClearedNpcIdsForTest = new List<int>();
+        public static readonly List<KeyValuePair<int, int>> MigratedNpcIdsForTest =
+            new List<KeyValuePair<int, int>>();
+        public static readonly List<int> FinalizedNpcIdsForTest = new List<int>();
         public static bool ClearConversation(int taiwuId, int npcId)
         { ClearedNpcIdsForTest.Add(npcId); return true; }
-        public static bool MigrateConversationIdentity(int taiwuId, int oldId, int newId) => true;
-        public static bool FinalizeConversationIdentityMigration(int taiwuId, int npcId) => true;
+        public static bool MigrateConversationIdentity(int taiwuId, int oldId, int newId)
+        { MigratedNpcIdsForTest.Add(new KeyValuePair<int, int>(oldId, newId)); return true; }
+        public static bool FinalizeConversationIdentityMigration(int taiwuId, int npcId)
+        { FinalizedNpcIdsForTest.Add(npcId); return true; }
         public static Func<int, string> ReplyForTest;
         public static Func<int, IList<JianghuYouling.Core.Prompt.TalkTurn>, bool> ProjectForTest;
         public sealed class GroupContext
@@ -295,9 +300,24 @@ namespace JianghuYouling.Effects
 {
     public static class EffectHandler
     {
+        public static Action<IList<int>, Action<List<JianghuYouling.Core.Behavior.CharacterProxyIdentity>, string>>
+            QueryCharacterProxyIdentitiesForTest;
+        public static Action<int, Action<bool, int, int, bool, bool, int, short, string>>
+            EnsureCharacterProxyForTest;
+        public static void QueryCharacterProxyIdentities(IList<int> ids,
+            Action<List<JianghuYouling.Core.Behavior.CharacterProxyIdentity>, string> done)
+        {
+            if (QueryCharacterProxyIdentitiesForTest == null)
+                throw new InvalidOperationException("Identity query fixture is not configured.");
+            QueryCharacterProxyIdentitiesForTest(ids, done);
+        }
         public static void EnsureCharacterProxy(int npcId,
             Action<bool, int, int, bool, bool, int, short, string> done)
-            => throw new InvalidOperationException("Reload tests must never create game characters.");
+        {
+            if (EnsureCharacterProxyForTest == null)
+                throw new InvalidOperationException("Reload tests must never create game characters.");
+            EnsureCharacterProxyForTest(npcId, done);
+        }
         public static void QuerySameBlockChars(int taiwuId, Action<List<int>> onResult, bool includeHostile = true)
             => onResult?.Invoke(new List<int>());
 

@@ -37,14 +37,22 @@ namespace JianghuYouling
         public static void OpenCharacterInfo(int characterId)
         {
             if (characterId < 0) return;
-            try
+            int generation = WorldLifecycle.Generation;
+            CharacterProxyIdentityService.EnsureForDisplay(EwReflect.TaiwuId(), characterId,
+                (resolvedId, error) =>
             {
-                ShowCharacterMenu(EasyPool.Get<ArgumentBox>()
-                    .Set("CharacterId", characterId)
-                    .SetObject("ViewCharacterMenuTaretPage",
-                        new SubPageIndex(ECharacterSubToggleBase.CharacterBase)));
-            }
-            catch (Exception e) { Debug.LogWarning("[江湖有灵] 打开人物详情失败: " + e.GetType().Name); }
+                if (!WorldLifecycle.IsSameWorld(generation)) return;
+                if (!string.IsNullOrWhiteSpace(error))
+                { LegacyDataNotice.Post("character-detail-identity-" + characterId, error); return; }
+                try
+                {
+                    ShowCharacterMenu(EasyPool.Get<ArgumentBox>()
+                        .Set("CharacterId", resolvedId)
+                        .SetObject("ViewCharacterMenuTaretPage",
+                            new SubPageIndex(ECharacterSubToggleBase.CharacterBase)));
+                }
+                catch (Exception e) { Debug.LogWarning("[江湖有灵] 打开人物详情失败: " + e.GetType().Name); }
+            });
         }
 
         private static void ShowCharacterMenu(ArgumentBox args)

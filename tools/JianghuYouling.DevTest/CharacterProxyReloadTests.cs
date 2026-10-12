@@ -4,6 +4,8 @@ using System.Linq;
 using System.Reflection;
 using JianghuYouling.Core.Memory;
 using JianghuYouling.Core.Persona;
+using JianghuYouling.Core.Behavior;
+using JianghuYouling.Effects;
 
 namespace JianghuYouling.DevTest
 {
@@ -13,7 +15,7 @@ namespace JianghuYouling.DevTest
         {
             foreach (int date in new[] { 177, 178, 179 }) RunReload(178, date);
             RunReload(-1, 177);
-            Console.WriteLine("[PASS] Proxy reload preserves identity, special portrait and content across all month boundaries");
+            Console.WriteLine("[PASS] Proxy reload restores only backend-confirmed identity and skin; all content retained across month boundaries");
         }
 
         private static void RunReload(int copiedDate, int restoredDate)
@@ -49,16 +51,24 @@ namespace JianghuYouling.DevTest
                 Check(memory.Save(), "initial memory");
                 var retainedFiles = Directory.GetFiles(root, "*", SearchOption.AllDirectories)
                     .ToDictionary(p => p, p => File.ReadAllBytes(p));
+                EffectHandler.QueryCharacterProxyIdentitiesForTest = (ids, done) =>
+                    done(ids.Select(id => new CharacterProxyIdentity
+                    {
+                        RequestedId = id, OriginalId = source, ResolvedId = proxy,
+                        DisplayTemplateId = 55, IsProxy = true,
+                    }).ToList(), null);
 
                 CharacterProxyIdentityService.ResetForWorldExit();
                 WorldLifecycle.HasWorldDate = false;
                 SingletonObject.DataForTest.CurrDate = 0;
-                Check(CharacterProxyIdentityService.TryGetDisplayTemplate(taiwu, proxy, out short early) && early == 55, "early skin");
+                Check(!CharacterProxyIdentityService.TryGetDisplayTemplate(taiwu, proxy, out _), "no unverified early skin");
                 WorldLifecycle.HasWorldDate = true;
                 SingletonObject.DataForTest.CurrDate = restoredDate;
                 for (int reload = 0; reload < 2; reload++)
                 {
                     CharacterProxyIdentityService.ResetForWorldExit();
+                    Check(CharacterProxyIdentityService.ResolveKnown(taiwu, source) == source, "disk hint cannot route before validation");
+                    CharacterProxyIdentityService.Prewarm(taiwu);
                     Check(CharacterProxyIdentityService.ResolveKnown(taiwu, source) == proxy, "proxy route retained");
                     Check(CharacterProxyIdentityService.TryGetDisplayTemplate(taiwu, proxy, out short skin) && skin == 55, "special skin retained");
                     Check(CharacterProxyIdentityService.IsKnownProxy(taiwu, proxy), "known proxy retained");
@@ -77,6 +87,7 @@ namespace JianghuYouling.DevTest
                 WorldLifecycle.HasWorldDate = previousDateReady;
                 SingletonObject.DataForTest = previousData;
                 TalkOrchestrator.ClearedNpcIdsForTest.Clear();
+                EffectHandler.QueryCharacterProxyIdentitiesForTest = null;
                 if (Directory.Exists(root)) Directory.Delete(root, true);
             }
         }

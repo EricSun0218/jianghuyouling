@@ -298,6 +298,14 @@ namespace JianghuYouling.DevTest
                 return 0;
             }
 
+            if (args != null && Array.Exists(args,
+                a => string.Equals(a, "--monthly-recovery-only", StringComparison.OrdinalIgnoreCase)))
+            {
+                MonthlyRecoveryTests.Run();
+                return 0;
+            }
+
+            MonthlyRecoveryTests.Run();
             TestInfluence();
             TestDeadCleanup();
             TestMemorySourceConsistency();
@@ -12719,8 +12727,8 @@ namespace JianghuYouling.DevTest
                     && monthly.Split(new[] { "roster.Sort(" }, StringSplitOptions.None).Length - 1 == 1).ToString(), "True");
 
             int fanoutStart = monthly.IndexOf("static IEnumerator CommitPreparedEventFanout", StringComparison.Ordinal);
-            int fanoutEventLog = monthly.IndexOf("EventLogStore.Upsert", fanoutStart, StringComparison.Ordinal);
-            int fanoutMemory = monthly.IndexOf("memory.Save()", fanoutEventLog, StringComparison.Ordinal);
+            int fanoutEventLog = monthly.IndexOf("EventLogStore.EnsureFanoutEntry", fanoutStart, StringComparison.Ordinal);
+            int fanoutMemory = monthly.IndexOf("EventFanoutMemoryWriter.TryCommit", fanoutEventLog, StringComparison.Ordinal);
             int fanoutRecipientCheckpoint = monthly.IndexOf("EventFanoutPolicy.MarkRecipientCommitted", fanoutMemory, StringComparison.Ordinal);
             int fanoutHeard = monthly.IndexOf("EventLogStore.TryUpdateHeard", fanoutRecipientCheckpoint, StringComparison.Ordinal);
             int projectionCommit = monthly.IndexOf("checkpoint.ProjectionCommitted = true", fanoutHeard, StringComparison.Ordinal);
@@ -13030,9 +13038,48 @@ namespace JianghuYouling.DevTest
         private static void TestGroupContextProjection()
         {
             CharacterProxyReloadTests.Run();
+            CharacterProxyIdentityTests.Run();
+            TestCharacterProxyEntrySourceContracts();
             GroupSynchronousCompletionTests.Run();
             Console.WriteLine("=== 群聊压缩写入个人上下文与完整原文回退自测 ===");
         }
+        private static void TestCharacterProxyEntrySourceContracts()
+        {
+            Console.WriteLine("=== 人物副本入口与只读身份查询源码契约自测 ===");
+            string chat = File.ReadAllText(FindRepoFile(Path.Combine("src", "JianghuYouling.Frontend", "UI", "ChatWindow.cs"))).Replace("\r\n", "\n");
+            string detail = File.ReadAllText(FindRepoFile(Path.Combine("src", "JianghuYouling.Frontend", "UI", "CharacterMenuLink.cs")));
+            string backend = File.ReadAllText(FindRepoFile(Path.Combine("src", "JianghuYouling.Backend", "BackendPluginMain.cs")));
+            string group = File.ReadAllText(FindRepoFile(Path.Combine("src", "JianghuYouling.Frontend", "Talk", "GroupChatOrchestrator.cs")));
+            string effects = File.ReadAllText(FindRepoFile(Path.Combine("src", "JianghuYouling.Frontend", "Effects", "EffectHandler.cs")));
+            int openStart = chat.IndexOf("private static void OpenVerified(", StringComparison.Ordinal);
+            string opening = chat.Substring(openStart, chat.IndexOf("private static void OpenResolved(", openStart, StringComparison.Ordinal) - openStart);
+            AssertEq("单聊与传音在开窗前共用只读核验",
+                (chat.Contains("=> OpenVerified(npcId, taiwuId, npcName, font, false)")
+                    && chat.Contains("=> OpenVerified(npcId, taiwuId, npcName, font, true)")
+                    && opening.Contains("EnsureForDisplay") && !opening.Contains("ResolveKnown")).ToString(), "True");
+            AssertEq("快速切换人物时旧查询不能抢开窗口",
+                opening.Contains("request != _identityOpenRequest").ToString(), "True");
+            AssertEq("已故副本入口不能跳过身份核验",
+                opening.Contains("!CharacterProxyIdentityService.HasRecordedProxyIdentity").ToString(), "True");
+            AssertEq("普通生成类型不能单独放行首句",
+                chat.Contains("_proxyIdentityReady = !_requiresProxyBeforeMessage\n                && CharacterProxyIdentityService.IsIdentityReady").ToString(), "True");
+            AssertEq("人物详情先确认身份再使用解析后编号",
+                (detail.Contains("EnsureForDisplay") && detail.Contains(".Set(\"CharacterId\", resolvedId)")).ToString(), "True");
+            AssertEq("群聊中的历史副本也先核验再读取画像",
+                (group.Contains("HasRecordedProxyIdentity(taiwuId, id)") && group.Contains("EnsureForDisplay(taiwuId, id")).ToString(), "True");
+            int queryStart = backend.IndexOf("private static SerializableModData QueryCharacterProxyIdentities(", StringComparison.Ordinal);
+            string query = backend.Substring(queryStart, backend.IndexOf("private static bool IsCharacterProxyAwaitingFirstJoin(", queryStart, StringComparison.Ordinal) - queryStart);
+            AssertEq("只读查询绑定当前世界和太吾并验证双向归属",
+                (query.Contains("TryValidateOperationBinding") && query.Contains("HasConsistentMapping")).ToString(), "True");
+            AssertEq("只读身份查询不造人不修档",
+                (!query.Contains("CreateLegalCharacterProxy(") && !query.Contains("DomainManager.Mod.Set")
+                    && !query.Contains("MigrateLegacyCharacterProxy(")).ToString(), "True");
+            AssertEq("查询复用既有只读 GM 通道",
+                effects.Contains("CallGm(\"character_proxy_identities\"").ToString(), "True");
+            AssertEq("反向归属冲突不再自动覆盖",
+                (!backend.Contains("string repairModId") && backend.Contains("character_proxy_identity_conflict")).ToString(), "True");
+        }
+
         private static void TestRecallCommitSourceContracts()
         {
             Console.WriteLine("=== 父聊天提交 / 延迟召回巩固源码契约自测 ===");

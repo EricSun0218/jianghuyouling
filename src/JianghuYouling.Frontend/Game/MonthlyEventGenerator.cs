@@ -124,6 +124,12 @@ namespace JianghuYouling
         {
             if (_running || taiwuId <= 0) { onEvent?.Invoke(null, null, 0); yield break; }
             if (!WorldLifecycle.IsActive) { onEvent?.Invoke(null, null, 0); yield break; }
+            int saveGeneration = WorldLifecycle.Generation;
+            uint saveWorld = WorldLifecycle.WorldId;
+            yield return MonthlySettlement.WaitForNativeSave(saveGeneration, saveWorld);
+            if (_running || !WorldLifecycle.IsSameWorld(saveGeneration)
+                || WorldLifecycle.WorldId != saveWorld)
+            { onEvent?.Invoke(null, null, 0); yield break; }
             if (MonthlySettlement.IsAdvancingMonthForMonthlyWork())
             {
                 Debug.Log("[JHYL_MONTHLY_EVENT_SKIP] native_month_advancing=true");
@@ -463,23 +469,35 @@ namespace JianghuYouling
                 Debug.LogWarning("[JHYL_MONTHLY_STALE_PROJECTION_RESET] date=" + date
                     + " reason=backend_operation_missing_in_current_save regenerate=true");
             }
-            EventFanoutCheckpoint pendingFanout = FindIncompleteEventFanout(saga);
-            if (pendingFanout != null)
+            EventFanoutCheckpoint pendingFanout;
+            while ((pendingFanout = FindIncompleteEventFanout(saga)) != null)
             {
+                if (pendingFanout.WorldDate > date)
+                {
+                    LogFanoutFailure(pendingFanout, "future_checkpoint");
+                    yield break;
+                }
                 bool fanoutRecovered = false;
                 yield return CommitPreparedEventFanout(saga, pendingFanout, taiwuId,
                     ok => fanoutRecovered = ok);
                 if (!fanoutRecovered || !FinalizeEventProjectionAfterFanout(saga, pendingFanout))
                 {
+                    if (fanoutRecovered) LogFanoutFailure(pendingFanout, "projection_commit");
                     Debug.LogWarning("[江湖有灵] 过月事件:恢复 durable 风闻 fanout 尚未完成，暂停本月推进");
                     yield break;
                 }
-                _evText = pendingFanout.ProjectionText;
-                _evArea = pendingFanout.AreaName;
-                _evHeard = pendingFanout.Heard;
                 Debug.Log("[江湖有灵] 过月事件:已恢复并完成 EventLog→风闻→Heard→Saga 投影流水线 event="
                     + pendingFanout.EventId);
-                yield break;
+                if (pendingFanout.WorldDate == date)
+                {
+                    _evText = pendingFanout.ProjectionText;
+                    _evArea = pendingFanout.AreaName;
+                    _evHeard = pendingFanout.Heard;
+                    yield break;
+                }
+                // Completing an older month's delivery must not consume this month's event.
+                // Continue through the normal saga/location validation with its restored facts.
+                _evArea = twAreaName;
             }
             EventFanoutCheckpoint committedFanout = FindCommittedEventFanout(saga, date);
             if (committedFanout != null)
@@ -1025,6 +1043,7 @@ namespace JianghuYouling
                 ok => fanoutCommitted = ok);
             if (!fanoutCommitted || !FinalizeEventProjectionAfterFanout(saga, fanout))
             {
+                if (fanoutCommitted) LogFanoutFailure(fanout, "projection_commit");
                 Debug.LogWarning("[江湖有灵] 过月事件:EventLog/风闻/Heard 尚未完整 durable 提交，本次不投影、不 ACK");
                 yield break;
             }
@@ -5210,113 +5229,118 @@ namespace JianghuYouling
                 || saga.FanoutJournal == null || !saga.FanoutJournal.Contains(checkpoint)
                 || !EventFanoutPolicy.IsValid(checkpoint))
             {
+                LogFanoutFailure(checkpoint, "invalid_checkpoint_or_world");
                 onDone?.Invoke(false);
                 yield break;
             }
 
+            if (!EventLogStore.EnsureFanoutEntry(taiwuId, checkpoint))
+            {
+                LogFanoutFailure(checkpoint, "event_log_commit");
+                onDone?.Invoke(false);
+                yield break;
+            }
             if (!checkpoint.EventLogCommitted)
             {
-                string brief = checkpoint.Actions.Count > 0 ? checkpoint.Actions[0] : checkpoint.StoryText;
-                if (brief.Length > 160) brief = brief.Substring(0, 160) + "…";
-                bool eventLogCommitted = EventLogStore.Upsert(taiwuId, new EventLogEntry
-                {
-                    EventId = checkpoint.EventId,
-                    Date = checkpoint.WorldDate,
-                    Area = checkpoint.AreaName,
-                    // 玩家可见正文按需生成；EventLog 先只保存行动事实、摘要与名册。
-                    Text = "",
-                    Brief = brief,
-                    Detail = "",
-                    Roster = checkpoint.Roster,
-                    Actions = new List<string>(checkpoint.Actions),
-                    Heard = checkpoint.Heard,
-                });
-                if (!eventLogCommitted)
-                {
-                    onDone?.Invoke(false);
-                    yield break;
-                }
                 checkpoint.EventLogCommitted = true;
                 checkpoint.UpdatedUtcTicks = DateTime.UtcNow.Ticks;
                 if (!EventSagaStore.Save(taiwuId, saga))
                 {
+                    checkpoint.EventLogCommitted = false;
+                    LogFanoutFailure(checkpoint, "event_log_checkpoint");
                     onDone?.Invoke(false);
                     yield break;
                 }
             }
 
             int written = 0;
+            bool memoryIncomplete = false;
             foreach (int recipientId in EventFanoutPolicy.PendingRecipients(checkpoint))
             {
                 if (!FanoutWorldIsCurrent(saga, taiwuId))
                 {
+                    LogFanoutFailure(checkpoint, "world_changed", recipientId);
                     onDone?.Invoke(false);
                     yield break;
                 }
                 string sourceId = checkpoint.EventId + ":" + recipientId;
-                bool committed = false;
-                try
+                bool committed = EventFanoutMemoryWriter.TryCommit(JianghuYoulingPaths.Memories,
+                    taiwuId, recipientId, new MemoryEntry
                 {
-                    NpcMemoryStore memory = NpcMemoryStore.Load(JianghuYoulingPaths.Memories,
-                        taiwuId.ToString(), recipientId.ToString());
-                    if (memory.LoadReliable)
-                    {
-                        MemoryEntry stored = memory.AddOrMerge(new MemoryEntry
-                        {
-                            Content = BuildEventOutcomeMemory(saga, checkpoint, recipientId),
-                            Type = MemoryType.Event,
-                            Keywords = "江湖事件,工具结果," + checkpoint.AreaName,
-                            Importance = 3,
-                            WorldDate = checkpoint.WorldDate,
-                            Valid = true,
-                            SourceKind = "monthly_event_fanout",
-                            SourceId = sourceId,
-                        }, out _);
-                        memory.Prune(checkpoint.WorldDate);
-                        committed = stored != null && memory.Save()
-                            && HasExactFanoutSource(memory, sourceId);
-                    }
+                    Content = BuildEventOutcomeMemory(saga, checkpoint, recipientId),
+                    Type = MemoryType.Event,
+                    Keywords = "江湖事件,工具结果," + checkpoint.AreaName,
+                    Importance = 3,
+                    WorldDate = checkpoint.WorldDate,
+                    Valid = true,
+                    SourceKind = "monthly_event_fanout",
+                    SourceId = sourceId,
+                }, out string memoryFailure);
+                if (!committed)
+                {
+                    LogFanoutFailure(checkpoint, memoryFailure, recipientId);
+                    memoryIncomplete = true;
                 }
-                catch (Exception ex)
+                else if (!EventFanoutPolicy.MarkRecipientCommitted(checkpoint, recipientId))
                 {
-                    Debug.LogWarning("[江湖有灵] 月事件风闻记忆提交失败 npc=" + recipientId
-                        + " event=" + checkpoint.EventId + " " + ex.GetType().Name);
-                }
-                if (!committed || !EventFanoutPolicy.MarkRecipientCommitted(checkpoint, recipientId)
-                    || !EventSagaStore.Save(taiwuId, saga))
-                {
+                    LogFanoutFailure(checkpoint, "recipient_checkpoint_invalid", recipientId);
                     onDone?.Invoke(false);
                     yield break;
                 }
+                else if (!EventSagaStore.Save(taiwuId, saga))
+                {
+                    checkpoint.CompletedRecipientIds.Remove(recipientId);
+                    LogFanoutFailure(checkpoint, "recipient_checkpoint_save", recipientId);
+                    onDone?.Invoke(false);
+                    yield break;
+                }
+                // A temporarily unreadable NPC must not starve every later recipient. Its own
+                // checkpoint stays pending, and projection/ACK still wait for all recipients.
                 if (++written % 5 == 0) yield return null;
             }
 
+            if (memoryIncomplete)
+            {
+                onDone?.Invoke(false);
+                yield break;
+            }
+            if (!FanoutWorldIsCurrent(saga, taiwuId))
+            {
+                LogFanoutFailure(checkpoint, "world_changed");
+                onDone?.Invoke(false);
+                yield break;
+            }
+            int heard = checkpoint.CompletedRecipientIds.Count;
+            if (!EventLogStore.TryUpdateHeard(taiwuId, checkpoint.EventId, heard))
+            {
+                LogFanoutFailure(checkpoint, "heard_commit");
+                onDone?.Invoke(false);
+                yield break;
+            }
             if (!checkpoint.HeardCommitted)
             {
-                if (!FanoutWorldIsCurrent(saga, taiwuId))
-                {
-                    onDone?.Invoke(false);
-                    yield break;
-                }
-                int heard = checkpoint.CompletedRecipientIds == null
-                    ? 0 : checkpoint.CompletedRecipientIds.Count;
-                if (!EventLogStore.TryUpdateHeard(taiwuId, checkpoint.EventId, heard))
-                {
-                    onDone?.Invoke(false);
-                    yield break;
-                }
+                bool previousFanoutCompleted = checkpoint.FanoutCompleted;
                 checkpoint.FanoutCompleted = true;
                 checkpoint.Heard = heard;
                 checkpoint.HeardCommitted = true;
                 checkpoint.UpdatedUtcTicks = DateTime.UtcNow.Ticks;
                 if (!EventSagaStore.Save(taiwuId, saga))
                 {
+                    checkpoint.FanoutCompleted = previousFanoutCompleted;
+                    checkpoint.Heard = 0;
+                    checkpoint.HeardCommitted = false;
+                    LogFanoutFailure(checkpoint, "heard_checkpoint");
                     onDone?.Invoke(false);
                     yield break;
                 }
             }
             onDone?.Invoke(EventFanoutPolicy.ReadyForProjection(checkpoint));
         }
+
+        static void LogFanoutFailure(EventFanoutCheckpoint checkpoint, string stage, int recipientId = 0)
+            => Debug.LogWarning("[JHYL_EVENT_FANOUT_PENDING] event=" + (checkpoint?.EventId ?? "missing")
+                + " date=" + (checkpoint?.WorldDate ?? -1) + " stage=" + stage
+                + " npc=" + recipientId + " remaining=" + EventFanoutPolicy.PendingRecipients(checkpoint).Count);
 
         static string BuildEventOutcomeMemory(EventSaga saga,
             EventFanoutCheckpoint checkpoint, int recipientId)
@@ -5390,16 +5414,6 @@ namespace JianghuYouling
         static bool FanoutWorldIsCurrent(EventSaga saga, int taiwuId)
             => saga != null && taiwuId > 0 && saga.TaiwuId == taiwuId && saga.WorldId > 0
                 && WorldLifecycle.HasWorldIdentity && saga.WorldId == WorldLifecycle.WorldId;
-
-        static bool HasExactFanoutSource(NpcMemoryStore memory, string sourceId)
-        {
-            if (memory?.All == null || string.IsNullOrWhiteSpace(sourceId)) return false;
-            foreach (MemoryEntry entry in memory.All)
-                if (entry != null && entry.Valid
-                    && string.Equals(entry.SourceKind, "monthly_event_fanout", StringComparison.Ordinal)
-                    && string.Equals(entry.SourceId, sourceId, StringComparison.Ordinal)) return true;
-            return false;
-        }
 
         static bool FinalizeEventProjectionAfterFanout(EventSaga saga,
             EventFanoutCheckpoint checkpoint)

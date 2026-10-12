@@ -587,6 +587,11 @@ namespace JianghuYouling
             Action<List<CompanionMonthlyResult>, int, int> onProgress = null)
         {
             if (taiwuId <= 0) { Debug.Log("[JHYL_COMPANION_MONTHLY_SKIP] invalid_taiwu"); onDone?.Invoke(null); yield break; }
+            int saveGeneration = WorldLifecycle.Generation;
+            uint saveWorld = WorldLifecycle.WorldId;
+            yield return MonthlySettlement.WaitForNativeSave(saveGeneration, saveWorld);
+            if (!WorldLifecycle.IsSameWorld(saveGeneration) || WorldLifecycle.WorldId != saveWorld)
+            { onDone?.Invoke(null); yield break; }
             if (MonthlySettlement.IsAdvancingMonthForMonthlyWork())
             {
                 Debug.Log("[JHYL_COMPANION_MONTHLY_SKIP] native_month_advancing=true");

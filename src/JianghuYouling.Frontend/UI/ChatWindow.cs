@@ -388,7 +388,9 @@ namespace JianghuYouling
                 return;
             _proxyIdentityChecked = true;
             _requiresProxyBeforeMessage = snap.CreatingType != 1;
-            _proxyIdentityReady = !_requiresProxyBeforeMessage;
+            _proxyIdentityReady = !_requiresProxyBeforeMessage
+                && CharacterProxyIdentityService.IsIdentityReady(_taiwuId,
+                    _proxySourceNpcId >= 0 ? _proxySourceNpcId : _npcId);
             if (_requiresProxyBeforeMessage && !_proxyHintShown)
             {
                 _proxyHintShown = true;
@@ -1353,7 +1355,8 @@ namespace JianghuYouling
                 return;
             }
 
-            if (statusText != null) statusText.text = "（正在复制中…）";
+            if (statusText != null) statusText.text = _requiresProxyBeforeMessage
+                ? "（正在复制中…）" : "（正在确认人物身份…）";
             int generation = WorldLifecycle.Generation;
             uint worldId = WorldLifecycle.WorldId;
             int sourceNpcId = _proxySourceNpcId >= 0 ? _proxySourceNpcId : _npcId;
@@ -4592,6 +4595,7 @@ namespace JianghuYouling
         static ChatTab _active;
         static long _useSeq;            // 单调递增使用序号:仅用于运行中页签的 LRU；不能参与左栏会话排序
         static TMP_FontAsset _font;     // 记下最近字体,新建页签 / 页签栏文字复用
+        static int _identityOpenRequest;
         static Vector2 _sharedPanelPosition = Vector2.zero;
         static bool _overlayHidden;     // HideForOverlay 让位中(供 RestoreFromOverlay 复原判定)
         static int _groupSeq;           // 仅用于无法构造成员键时的兜底
@@ -4897,21 +4901,32 @@ namespace JianghuYouling
         }
 
         public static void Open(int npcId, int taiwuId, string npcName, TMP_FontAsset font)
-        {
-            if (font != null) _font = font;
-            if (TryOpenSoulConversation(npcId, taiwuId, npcName, font)) return;
-            int knownId = CharacterProxyIdentityService.ResolveKnown(taiwuId, npcId);
-            OpenResolved(knownId > 0 ? knownId : npcId, taiwuId, npcName, font,
-                false, npcId);
-        }
+            => OpenVerified(npcId, taiwuId, npcName, font, false);
 
         public static void OpenRemote(int npcId, int taiwuId, string npcName, TMP_FontAsset font)
+            => OpenVerified(npcId, taiwuId, npcName, font, true);
+
+        private static void OpenVerified(int npcId, int taiwuId, string npcName,
+            TMP_FontAsset font, bool remote)
         {
+            int request = ++_identityOpenRequest;
             if (font != null) _font = font;
-            if (TryOpenSoulConversation(npcId, taiwuId, npcName, font)) return;
-            int knownId = CharacterProxyIdentityService.ResolveKnown(taiwuId, npcId);
-            OpenResolved(knownId > 0 ? knownId : npcId, taiwuId, npcName, font,
-                true, npcId);
+            // A rollback can reuse a former proxy id, including one locally marked dead.
+            // Such entries must pass the same current-world check before opening a soul tab.
+            if (!CharacterProxyIdentityService.HasRecordedProxyIdentity(taiwuId, npcId)
+                && TryOpenSoulConversation(npcId, taiwuId, npcName, font)) return;
+            int generation = WorldLifecycle.Generation;
+            CharacterProxyIdentityService.EnsureForDisplay(taiwuId, npcId, (resolvedId, error) =>
+            {
+                if (request != _identityOpenRequest || !WorldLifecycle.IsSameWorld(generation)) return;
+                if (!string.IsNullOrWhiteSpace(error))
+                {
+                    LegacyDataNotice.Post("character-identity-" + npcId, error);
+                    return;
+                }
+                if (TryOpenSoulConversation(resolvedId, taiwuId, npcName, font)) return;
+                OpenResolved(resolvedId, taiwuId, npcName, font, remote, npcId);
+            });
         }
 
         private static void OpenResolved(int npcId, int taiwuId, string npcName,
@@ -4950,6 +4965,7 @@ namespace JianghuYouling
 
         public static void OpenAssistant(TMP_FontAsset font = null)
         {
+            _identityOpenRequest++;
             if (font != null) _font = font;
             int taiwuId = ResolveCurrentTaiwuId();
             RevealNavigationIdentity(taiwuId, AssistantNavigationIdentity(taiwuId));
@@ -4976,6 +4992,7 @@ namespace JianghuYouling
         static void OpenGroupCore(List<KeyValuePair<int, string>> roster, int taiwuId,
             TMP_FontAsset font, string persistedGroupId, bool newlyCreated)
         {
+            _identityOpenRequest++;
             var resolvedRoster = new List<KeyValuePair<int, string>>();
             var seen = new HashSet<int>();
             if (roster != null)
@@ -5247,6 +5264,7 @@ namespace JianghuYouling
         // ---------- 页签激活 / 关闭 / 完成回调 ----------
         static void Activate(ChatTab tab)
         {
+            _identityOpenRequest++;
             SetEmptyConversationVisible(false);
             var prev = _active;
             if (prev != null && prev != tab) prev.ConsolidateGroupMemoryNow();   // 切走群聊即固化其记忆:去和某成员单聊立刻能想起群里的事
@@ -5288,6 +5306,7 @@ namespace JianghuYouling
         /// 不能走 CloseSelf（它会在离开世界时反而启动画像固化 LLM）。</summary>
         public static void ResetForWorldExit()
         {
+            _identityOpenRequest++;
             ResetConversationArchive();
             GroupMemberPicker.CancelForWorldExit();
             TaiwuDirectActionWindow.CloseForWorldExit();

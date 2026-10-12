@@ -40,7 +40,7 @@ namespace JianghuYouling.Backend
     /// 《江湖有灵》后端薄插件:跑在后端逻辑线程,持有真实游戏域(Character/Taiwu…)。
     /// 仅暴露需后端权限的写操作 + RPC 入口。M1 先只有一个 Ping 验证前后端通路。
     /// </summary>
-    [PluginConfig("江湖有灵 Backend", "jianghuyouling", "0.34.0.29")]
+    [PluginConfig("江湖有灵 Backend", "jianghuyouling", "0.34.0.30")]
     public sealed class BackendPluginMain : TaiwuRemakePlugin
     {
         private const int DefaultNpcTravelDurationMonths = 6;
@@ -3114,6 +3114,8 @@ namespace JianghuYouling.Backend
                         try { short fvv = DomainManager.Character.GetFavorability(sp, tg); favST = (fvv == short.MinValue) ? 0 : fvv; } catch { favST = 0; }
                         var okPi = new SerializableModData(); okPi.Set("success", true); okPi.Set("rel", rel ?? ""); okPi.Set("favor", favST); return okPi;
                     }
+                    case "character_proxy_identities":
+                        return QueryCharacterProxyIdentities(p);
                     case "persona_traits":   // 只读：画像生成需要、显示数据未公开的稳定人物字段。
                     {
                         int charId = 0; p.Get("char", out charId);
@@ -5138,7 +5140,7 @@ namespace JianghuYouling.Backend
             int npcId = 0;
             if (!p.Get("npc_id", out npcId) || npcId <= 0) return Fail("missing_parameter", "缺少参数");
             npcId = ResolveCharacterProxyId(npcId);
-
+            if (npcId <= 0) return Fail("character_proxy_identity_conflict", "人物身份无法确认，未执行离队");
             bool wasFollowing = false, wasInGroup = false;
             try
             {
@@ -5292,6 +5294,121 @@ namespace JianghuYouling.Backend
 
         internal static bool IsCharacterProxy(int characterId)
             => TryGetCharacterProxySource(characterId, out _);
+
+        // 前端本地资料不会随游戏回档。显示、开窗只能使用当前存档的双向映射，
+        // 此查询不造人、不修补映射、不迁移旧实体，也不改变玩家的游戏状态。
+        private static SerializableModData QueryCharacterProxyIdentities(SerializableModData p)
+        {
+            if (!TryValidateOperationBinding(p, out _, out int taiwuId,
+                    out string code, out string message))
+                return Fail(code, message);
+            string csv;
+            if (!p.Get("ids", out csv) || string.IsNullOrWhiteSpace(csv)
+                || csv.Length > CharacterProxyIdentity.MaxQueryBatch * 12)
+                return Fail("invalid_proxy_query", "人物身份查询参数无效");
+            string[] parts = csv.Split(',');
+            if (parts.Length > CharacterProxyIdentity.MaxQueryBatch)
+                return Fail("invalid_proxy_query", "人物身份查询数量超出上限");
+            var response = new SerializableModData();
+            for (int index = 0; index < parts.Length; index++)
+            {
+                if (!int.TryParse(parts[index], out int requestedId) || requestedId <= 0)
+                    return Fail("invalid_proxy_query", "人物编号无效");
+                CharacterProxyIdentity identity;
+                try { identity = ReadCharacterProxyIdentity(requestedId, taiwuId); }
+                catch (Exception e)
+                {
+                    identity = new CharacterProxyIdentity { RequestedId = requestedId,
+                        Error = "人物身份读取异常:" + e.GetType().Name };
+                }
+                var row = new SerializableModData();
+                row.Set("requested", identity.RequestedId);
+                row.Set("original", identity.OriginalId);
+                row.Set("resolved", identity.ResolvedId);
+                row.Set("template", (int)identity.DisplayTemplateId);
+                row.Set("proxy", identity.IsProxy);
+                row.Set("prepare", identity.RequiresPreparation);
+                row.Set("dead", identity.IsDead);
+                row.Set("error", identity.Error ?? "");
+                response.Set("identity_" + index, row);
+            }
+            response.Set("success", true);
+            response.Set("count", parts.Length);
+            return response;
+        }
+
+        private static CharacterProxyIdentity ReadCharacterProxyIdentity(int requestedId, int taiwuId)
+        {
+            var result = new CharacterProxyIdentity { RequestedId = requestedId };
+            int currentId = requestedId;
+            if (TryGetReplacementProxy(currentId, out int replacement)) currentId = replacement;
+            if (TryGetCharacterProxySource(currentId, out int reverseSource))
+                return ReadConfirmedCharacterProxy(result, reverseSource, currentId, taiwuId);
+            if (TryGetPersistedCharacterProxy(currentId, out int directProxy))
+                return ReadConfirmedCharacterProxy(result, currentId, directProxy, taiwuId);
+
+            if (DomainManager.Character.TryGetDeadCharacter(currentId) is DeadCharacter dead
+                && Config.Character.Instance[dead.TemplateId].CreatingType == 1)
+            {
+                result.OriginalId = result.ResolvedId = currentId;
+                result.IsDead = true;
+                return result;
+            }
+            if (DomainManager.Character.IsTemporaryEnemy(currentId)
+                || !TryResolveNativeCharacterSource(currentId, out int sourceId,
+                    out Character source, out string error))
+            {
+                result.Error = "人物不存在、已失效或属于临时剧情对象";
+                return result;
+            }
+            if ((sourceId == taiwuId && requestedId != taiwuId)
+                || DomainManager.Character.IsTemporaryEnemy(sourceId)
+                || source.GetTemplateId() == Config.Character.DefKey.CrossArchiveFuyuHilt
+                || source.GetTemplateId() == Config.Character.DefKey.OverwrittenTaiwu)
+            {
+                result.Error = "剧情投影或地图标记不能作为独立人物";
+                return result;
+            }
+            if (TryGetReplacementProxy(sourceId, out replacement)
+                && TryGetCharacterProxySource(replacement, out reverseSource))
+                return ReadConfirmedCharacterProxy(result, reverseSource, replacement, taiwuId);
+            if (TryGetCharacterProxySource(sourceId, out reverseSource))
+                return ReadConfirmedCharacterProxy(result, reverseSource, sourceId, taiwuId);
+            if (TryGetPersistedCharacterProxy(sourceId, out directProxy))
+                return ReadConfirmedCharacterProxy(result, sourceId, directProxy, taiwuId);
+            result.OriginalId = result.ResolvedId = sourceId;
+            result.RequiresPreparation = source.IsCreatedWithFixedTemplate();
+            return result;
+        }
+
+        private static CharacterProxyIdentity ReadConfirmedCharacterProxy(CharacterProxyIdentity result,
+            int sourceId, int proxyId, int taiwuId)
+        {
+            bool hasReverse = TryGetCharacterProxySource(proxyId, out int reverseSource);
+            bool hasForward = TryGetPersistedCharacterProxy(sourceId, out int forwardProxy);
+            if (!hasReverse || !hasForward || !CharacterProxyIdentity.HasConsistentMapping(
+                    sourceId, proxyId, reverseSource, forwardProxy, taiwuId))
+            {
+                result.Error = "人物副本的双向身份记录冲突，已停止使用该映射";
+                return result;
+            }
+            bool alive = DomainManager.Character.TryGetElement_Objects(proxyId, out Character proxy)
+                && IsLegalIntelligentProxy(proxy);
+            DeadCharacter dead = alive ? null : DomainManager.Character.TryGetDeadCharacter(proxyId);
+            if (!alive && (dead == null || Config.Character.Instance[dead.TemplateId].CreatingType != 1))
+            {
+                result.Error = "存档中的人物副本已失效，未使用本地旧编号代替";
+                return result;
+            }
+            result.OriginalId = sourceId;
+            result.ResolvedId = proxyId;
+            result.IsProxy = true;
+            result.IsDead = !alive;
+            if (DomainManager.Character.TryGetElement_Objects(sourceId, out Character source)
+                && source != null)
+                result.DisplayTemplateId = source.GetTemplateId();
+            return result;
+        }
 
         /// <summary>
         /// 固定人物副本刚建立时可能没有可用 Location。玩家第一次见到的原人物本就是当面，
@@ -5907,6 +6024,15 @@ namespace JianghuYouling.Backend
             int legacyProxyId, out string error)
         {
             error = null;
+            int taiwuId = DomainManager.Taiwu.GetTaiwuCharId();
+            if (sourceId <= 0 || proxyId <= 0 || sourceId == proxyId
+                || sourceId == taiwuId || proxyId == taiwuId
+                || (TryGetCharacterProxySource(proxyId, out int previousSource)
+                    && previousSource != sourceId))
+            {
+                error = "人物副本编号或归属冲突，未覆盖已有身份";
+                return false;
+            }
             string modId = string.IsNullOrWhiteSpace(_modIdStr)
                 ? RpcConst.FallbackModId : _modIdStr;
             try
@@ -6070,7 +6196,7 @@ namespace JianghuYouling.Backend
                     out int completedLegacyId, out string completionError))
                     return Indeterminate("character_proxy_legacy_finalize_indeterminate",
                         completionError);
-                return CharacterProxyResult(requestedSourceId, existingReplacement,
+                return CharacterProxyResult(existingCanonicalSourceId, existingReplacement,
                     true, false, "已迁移到合法人物副本",
                     completedLegacyId > 0 ? completedLegacyId : legacyId);
             }
@@ -6095,7 +6221,7 @@ namespace JianghuYouling.Backend
             if (!CompletePendingLegacyMigration(context, canonicalSourceId, newProxy,
                 out _, out string finalizeError))
                 return Indeterminate("character_proxy_legacy_finalize_indeterminate", finalizeError);
-            return CharacterProxyResult(requestedSourceId, newId, true, true,
+            return CharacterProxyResult(canonicalSourceId, newId, true, true,
                 "旧固定模板副本已迁移为合法普通人物", legacyId);
         }
 
@@ -6187,6 +6313,10 @@ namespace JianghuYouling.Backend
             // 已经拿副本 id 再进来时保持幂等，不得复制副本的副本。
             if (TryGetCharacterProxySource(requestedId, out int existingSource))
             {
+                if (!TryGetPersistedCharacterProxy(existingSource, out int confirmedProxy)
+                    || !CharacterProxyIdentity.HasConsistentMapping(existingSource, requestedId,
+                        existingSource, confirmedProxy, taiwuId))
+                    return Fail("character_proxy_identity_conflict", "人物副本双向身份记录冲突");
                 int directProxyMigrationFrom = 0;
                 Character requestedProxy;
                 if (DomainManager.Character.TryGetElement_Objects(requestedId, out requestedProxy)
@@ -6203,6 +6333,8 @@ namespace JianghuYouling.Backend
                         return Indeterminate("character_proxy_legacy_finalize_indeterminate",
                             directProxyFinalizeError);
                 }
+                if (requestedProxy == null)
+                    return Fail("character_proxy_missing", "既有人物副本已失效");
                 return CharacterProxyResult(existingSource, requestedId, true, false,
                     "已使用人物副本", directProxyMigrationFrom);
             }
@@ -6265,6 +6397,12 @@ namespace JianghuYouling.Backend
 
             if (TryGetPersistedCharacterProxy(canonicalSourceId, out int existingProxy))
             {
+                // 缺失或冲突的反向记录不能靠覆盖“修复”：该编号可能已经属于另一人。
+                if (!TryGetCharacterProxySource(existingProxy, out int reverseSource)
+                    || !CharacterProxyIdentity.HasConsistentMapping(canonicalSourceId, existingProxy,
+                        reverseSource, existingProxy, taiwuId))
+                    return Fail("character_proxy_identity_conflict",
+                        "既有人物副本的双向身份记录不一致，未改写人物归属");
                 Character mapped;
                 if (!DomainManager.Character.TryGetElement_Objects(existingProxy, out mapped) || mapped == null)
                     return Indeterminate("character_proxy_missing",
@@ -6283,28 +6421,6 @@ namespace JianghuYouling.Backend
                     mapped, out int mappedMigrationFrom, out string mappedFinalizeError))
                     return Indeterminate("character_proxy_legacy_finalize_indeterminate",
                         mappedFinalizeError);
-                // 上次可能在 source→proxy 已落盘、reverse 写入前中断；用既有实体补齐映射，
-                // 绝不创建第二个副本。每个固定人物严格保持一对一身份。
-                bool hasReverse = TryGetCharacterProxySource(existingProxy, out int reverseSource);
-                if (!hasReverse || reverseSource != canonicalSourceId)
-                {
-                    string repairModId = string.IsNullOrWhiteSpace(_modIdStr)
-                        ? RpcConst.FallbackModId : _modIdStr;
-                    try
-                    {
-                        DomainManager.Mod.SetInt(context, repairModId,
-                            CharacterProxyReverseKey(existingProxy), true, canonicalSourceId);
-                    }
-                    catch (Exception e)
-                    {
-                        return Indeterminate("character_proxy_reverse_mapping_indeterminate",
-                            "既有人物副本的反向身份映射无法确认:" + e.GetType().Name);
-                    }
-                    if (!TryGetCharacterProxySource(existingProxy, out reverseSource)
-                        || reverseSource != canonicalSourceId)
-                        return Indeterminate("character_proxy_reverse_mapping_indeterminate",
-                            "既有人物副本的反向身份映射尚未可靠写入");
-                }
                 return CharacterProxyResult(canonicalSourceId, existingProxy, true, false,
                     "已使用人物副本", mappedMigrationFrom > 0
                         ? mappedMigrationFrom
@@ -6332,6 +6448,15 @@ namespace JianghuYouling.Backend
         private static SerializableModData CharacterProxyResult(int originalId, int resolvedId,
             bool isProxy, bool created, string message, int migrationFromId = 0)
         {
+            if (isProxy)
+            {
+                CharacterProxyIdentity confirmed = ReadConfirmedCharacterProxy(
+                    new CharacterProxyIdentity { RequestedId = originalId }, originalId, resolvedId,
+                    DomainManager.Taiwu.GetTaiwuCharId());
+                if (!confirmed.IsValidFor(DomainManager.Taiwu.GetTaiwuCharId()))
+                    return Fail("character_proxy_identity_conflict", confirmed.Error
+                        ?? "人物副本身份未通过当前存档核验");
+            }
             var result = new SerializableModData();
             result.Set("success", true);
             result.Set("status", "executed");
@@ -6358,10 +6483,13 @@ namespace JianghuYouling.Backend
         private static int ResolveCharacterProxyId(int npcId)
         {
             if (npcId <= 0) return npcId;
-            if (TryGetReplacementProxy(npcId, out int replacementId)) return replacementId;
-            if (TryGetCharacterProxySource(npcId, out _)) return npcId;
-            if (!TryGetPersistedCharacterProxy(npcId, out int proxyId)) return npcId;
-            return TryGetReplacementProxy(proxyId, out replacementId) ? replacementId : proxyId;
+            try
+            {
+                int taiwuId = DomainManager.Taiwu.GetTaiwuCharId();
+                CharacterProxyIdentity identity = ReadCharacterProxyIdentity(npcId, taiwuId);
+                return identity.IsValidFor(taiwuId) ? identity.ResolvedId : 0;
+            }
+            catch { return 0; }
         }
 
         private static SerializableModData JoinTeam(DataContext context, SerializableModData p)
@@ -6371,6 +6499,7 @@ namespace JianghuYouling.Backend
             if (!p.Get("npc_id", out npcId) || npcId <= 0) return Fail("missing_parameter", "缺少参数");
             int requestedId = npcId;
             npcId = ResolveCharacterProxyId(npcId);
+            if (npcId <= 0) return Fail("character_proxy_identity_conflict", "人物身份无法确认，未执行入队");
             if (npcId == requestedId)
             {
                 Character requested;
@@ -6501,6 +6630,7 @@ namespace JianghuYouling.Backend
             int npcId = 0;
             if (!p.Get("npc_id", out npcId) || npcId <= 0) return Fail("missing_parameter", "缺少参数");
             npcId = ResolveCharacterProxyId(npcId);
+            if (npcId <= 0) return Fail("character_proxy_identity_conflict", "人物身份无法确认");
             bool inGroup;
             try { inGroup = DomainManager.Taiwu.IsInGroup(npcId); }
             catch (Exception e) { return Fail("query_failed", "队友判定失败:" + e.GetType().Name); }

@@ -575,18 +575,28 @@ namespace JianghuYouling.BackendContractTests
                 RequireContains(proxyIdentity,
                     "(ok, originalId, resolvedId, created, isProxy, migrationFromId,",
                     "the frontend preserves backend proxy classification for timestamp persistence");
+                Require(!proxyIdentity.Contains("known > 0 && known != npcId && known != resolvedId", StringComparison.Ordinal),
+                    "stale local proxy ids are never treated as authoritative migration sources");
+                Require(!proxyIdentity.Contains("!Register(taiwuId, known, resolvedId, displayTemplateId,", StringComparison.Ordinal),
+                    "stale local proxy ids never become newly registered aliases");
                 RequireContains(proxyIdentity,
-                    "known > 0 && known != npcId && known != resolvedId",
-                    "a stale local proxy identity is migrated when backend authority returns a different live proxy");
-                RequireContains(proxyIdentity,
-                    "!Register(taiwuId, known, resolvedId, displayTemplateId,",
-                    "stale local proxy routes are durably flattened to the newly authoritative identity");
+                    "if (error == null && (!CanMigrateContent(identity, migrationSource)",
+                    "content migration verifies ownership before preparing any source data");
+                RequireContains(proxyIdentity, "|| !CanMigrateContent(identity, stableOriginalId)",
+                    "content migration validates the stable original owner");
+                RequireContains(proxyIdentity, "|| !CanMigrateContent(identity, npcId)))",
+                    "content migration validates the selected source owner");
                 RequireContains(proxyIdentity,
                     "CopyDates = new Dictionary<int, int>(_copyDates)",
                     "fixed-template proxy routes durably record their game-month creation time");
                 RequireContains(proxyIdentity,
-                    "private const int UntimestampedSchemaVersion = 1;",
-                    "existing fixed-template visual mappings survive the timestamp schema upgrade");
+                    "DurableFileStore.TryReadRecoverableTextReadOnly(PathFor(taiwuId), MaxFileBytes,",
+                    "historical fixed-template cache loading does not rewrite saved content");
+                RequireContains(proxyIdentity,
+                    "return Verified.TryGetValue(npcId, out CharacterProxyIdentity identity)",
+                    "runtime routing requires current backend proof instead of historical aliases");
+                Require(!proxyIdentity.Contains("UntimestampedSchemaVersion", StringComparison.Ordinal),
+                    "historical cache loading does not upgrade an obsolete schema");
                 RequireContains(proxyIdentity,
                     "int copyDate = isProxy && created ? CurrentWorldDate() : -1;",
                     "only a backend-confirmed new proxy records the current month as its creation time");
@@ -600,8 +610,10 @@ namespace JianghuYouling.BackendContractTests
                     "int stableOriginalId = originalId > 0 ? originalId : npcId;",
                     "frontend proxy routing persists the backend-canonical source identity");
                 RequireContains(proxyIdentity,
-                    "RegisterVolatileAlias(npcId, resolvedId);",
-                    "one-scene temporary actor ids are routed in memory without polluting durable identity state");
+                    "Verified[identity.RequestedId] = identity;",
+                    "backend-confirmed requested identity aliases are routed only in current runtime memory");
+                Require(!proxyIdentity.Contains("RegisterVolatileAlias", StringComparison.Ordinal),
+                    "an unverified temporary alias cannot bypass current backend authority");
                 string nativeRecordingEnable = Slice(talkEntryHost,
                     "static IEnumerator EnableNativeInteractionRecording(",
                     "static int ResolveRecordingNpcId(");
@@ -635,16 +647,22 @@ namespace JianghuYouling.BackendContractTests
                     "public static void Open(int npcId, int taiwuId, string npcName, TMP_FontAsset font)",
                     "public static void OpenRemote(int npcId, int taiwuId, string npcName, TMP_FontAsset font)");
                 RequireContains(singleOpen,
-                    "CharacterProxyIdentityService.ResolveKnown(taiwuId, npcId)",
-                    "single-chat opening only follows an already-established proxy route");
+                    "OpenVerified(npcId, taiwuId, npcName, font, false)",
+                    "single-chat opening enters the current backend identity gate");
                 Require(!singleOpen.Contains("EnsureForConversation", StringComparison.Ordinal),
                     "single-chat opening never creates a fixed-template proxy before the player speaks");
                 string remoteOpen = Slice(chatWindow,
                     "public static void OpenRemote(int npcId, int taiwuId, string npcName, TMP_FontAsset font)",
                     "private static void OpenResolved(int npcId, int taiwuId, string npcName");
                 RequireContains(remoteOpen,
-                    "CharacterProxyIdentityService.ResolveKnown(taiwuId, npcId)",
-                    "remote opening only follows an already-established proxy route");
+                    "OpenVerified(npcId, taiwuId, npcName, font, true)",
+                    "remote opening enters the same current backend identity gate");
+                RequireContains(remoteOpen,
+                    "CharacterProxyIdentityService.EnsureForDisplay(taiwuId, npcId, (resolvedId, error) =>",
+                    "opening validates identity using the read-only backend query");
+                RequireContains(remoteOpen,
+                    "if (request != _identityOpenRequest || !WorldLifecycle.IsSameWorld(generation)) return;",
+                    "opening rejects identity responses from obsolete requests or generations");
                 Require(!remoteOpen.Contains("EnsureForConversation", StringComparison.Ordinal),
                     "remote opening never creates a fixed-template proxy before the player speaks");
                 string soulOpen = Slice(chatWindow,

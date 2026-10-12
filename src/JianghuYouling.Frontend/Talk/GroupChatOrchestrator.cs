@@ -1232,6 +1232,16 @@ namespace JianghuYouling
             NpcSnapshot snap = null;
             try
             {
+                if (CharacterProxyIdentityService.HasRecordedProxyIdentity(taiwuId, id))
+                {
+                    bool identityDone = false;
+                    string identityError = null;
+                    CharacterProxyIdentityService.EnsureForDisplay(taiwuId, id, (resolved, error) =>
+                    { id = resolved; identityError = error; identityDone = true; });
+                    while (!identityDone && WorldLifecycle.IsSameWorld(_worldGeneration)) yield return null;
+                    if (!WorldLifecycle.IsSameWorld(_worldGeneration)
+                        || !identityDone || !string.IsNullOrWhiteSpace(identityError)) yield break;
+                }
                 yield return NpcSnapshotReader.Fetch(id, s => snap = s);
                 if (snap == null || snap.NpcId < 0) yield break;
                 _setupPortraits.Add(snap);

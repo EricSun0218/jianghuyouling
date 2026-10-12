@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using JianghuYouling.Core.Behavior;
 using JianghuYouling.Core.Memory;
 using JianghuYouling.Core.Persistence;
 using JianghuYouling.Core.Persona;
@@ -12,13 +13,12 @@ using UnityEngine;
 namespace JianghuYouling
 {
     /// <summary>
-    /// 固定模板人物的前端身份路由。后端存档映射是权威来源；本文件只保存已经完成本地资料
-    /// 迁移的映射，保证任何聊天入口都不会在“副本已建、资料尚未搬完”时提前打开。
+    /// 固定模板人物的前端身份路由。当前后端存档是身份权威；本地文件只记录历史资料绑定。
+    /// 显示与开窗先只读核验归属，实际发言再完成必要的副本创建与资料准备。
     /// </summary>
     internal static class CharacterProxyIdentityService
     {
         private const int SchemaVersion = 2;
-        private const int UntimestampedSchemaVersion = 1;
         private const int MaxEntries = 100000;
         private const int MaxFileBytes = 8 * 1024 * 1024;
         private static readonly object Gate = new object();
@@ -27,12 +27,14 @@ namespace JianghuYouling
         private static string _scope;
         private static int _taiwuId;
         private static Dictionary<int, int> _resolved = new Dictionary<int, int>();
-        private static Dictionary<int, int> _volatileResolved = new Dictionary<int, int>();
-        private static HashSet<int> _proxyIds = new HashSet<int>();
         private static HashSet<int> _reconciledOriginals = new HashSet<int>();
-        private static HashSet<int> _validatedProxyIds = new HashSet<int>();
         private static Dictionary<int, short> _displayTemplates = new Dictionary<int, short>();
         private static Dictionary<int, int> _copyDates = new Dictionary<int, int>();
+        // Disk mappings describe where content was saved, not who owns an id in this load.
+        private static readonly Dictionary<int, CharacterProxyIdentity> Verified =
+            new Dictionary<int, CharacterProxyIdentity>();
+        private static readonly Dictionary<int, List<Action<CharacterProxyIdentity, string>>> ReadPending =
+            new Dictionary<int, List<Action<CharacterProxyIdentity, string>>>();
 
         private sealed class State
         {
@@ -50,26 +52,8 @@ namespace JianghuYouling
             lock (Gate)
             {
                 EnsureLoaded(taiwuId);
-                int current = npcId;
-                var seen = new HashSet<int>();
-                bool volatilePath = false;
-                while (seen.Add(current))
-                {
-                    int value;
-                    if (_volatileResolved.TryGetValue(current, out value))
-                        volatilePath = true;
-                    else if (!_resolved.TryGetValue(current, out value))
-                        break;
-                    if (value <= 0 || value == current) break;
-                    current = value;
-                }
-                // 旧版本可能留下“原阶段→旧副本→组权威副本”的链；压平后后续入口一次到位。
-                if (current > 0 && current != npcId)
-                {
-                    if (volatilePath) _volatileResolved[npcId] = current;
-                    else _resolved[npcId] = current;
-                }
-                return current > 0 ? current : npcId;
+                return Verified.TryGetValue(npcId, out CharacterProxyIdentity identity)
+                    && identity.IsValidFor(taiwuId) ? identity.ResolvedId : npcId;
             }
         }
 
@@ -79,7 +63,9 @@ namespace JianghuYouling
             lock (Gate)
             {
                 EnsureLoaded(taiwuId);
-                return _proxyIds.Contains(npcId);
+                return Verified.TryGetValue(npcId, out CharacterProxyIdentity identity)
+                    && identity.IsValidFor(taiwuId) && identity.IsProxy
+                    && identity.ResolvedId == npcId;
             }
         }
 
@@ -91,11 +77,194 @@ namespace JianghuYouling
             lock (Gate)
             {
                 EnsureLoaded(taiwuId);
-                int resolved = ResolveKnown(taiwuId, npcId);
-                return _displayTemplates.TryGetValue(resolved, out templateId)
-                    && templateId >= 0;
+                if (!Verified.TryGetValue(npcId, out CharacterProxyIdentity identity)
+                    || !identity.IsValidFor(taiwuId) || !identity.IsProxy)
+                    return false;
+                templateId = identity.DisplayTemplateId;
+                // The story anchor may have left the live object table. Its cached skin is
+                // usable only after the backend proves the exact original/proxy ownership.
+                if (templateId < 0 && _resolved.TryGetValue(identity.OriginalId, out int storedId)
+                    && storedId == identity.ResolvedId && ContentIdentityMatches(identity)
+                    && _displayTemplates.TryGetValue(identity.ResolvedId, out short storedTemplate))
+                    templateId = storedTemplate;
+                return templateId >= 0;
             }
         }
+
+        internal static bool IsIdentityReady(int taiwuId, int requestedId)
+        {
+            lock (Gate)
+            {
+                EnsureLoaded(taiwuId);
+                return Verified.TryGetValue(requestedId, out CharacterProxyIdentity identity)
+                    && identity.IsValidFor(taiwuId) && !identity.RequiresPreparation
+                    && ContentIdentityMatches(identity)
+                    && (!identity.IsProxy || (_resolved.TryGetValue(identity.OriginalId,
+                        out int storedId) && storedId == identity.ResolvedId));
+            }
+        }
+
+        internal static bool HasRecordedProxyIdentity(int taiwuId, int npcId)
+        {
+            if (taiwuId <= 0 || npcId <= 0 || JianghuYoulingPaths.CurrentWorldId == 0) return false;
+            lock (Gate)
+            {
+                EnsureLoaded(taiwuId);
+                return (_resolved.TryGetValue(npcId, out int target) && target != npcId)
+                    || _displayTemplates.ContainsKey(npcId) || _copyDates.ContainsKey(npcId);
+            }
+        }
+
+        // A reused destination must never inherit another person's chat, portrait or memory.
+        // Ambiguous old content stays on disk; only a current authoritative alias can share it.
+        private static bool ContentIdentityMatches(CharacterProxyIdentity identity)
+        {
+            bool recordedOwner = false;
+            foreach (KeyValuePair<int, int> pair in _resolved)
+            {
+                if (pair.Key == pair.Value || pair.Value != identity.ResolvedId) continue;
+                recordedOwner = true;
+                if (pair.Key != identity.OriginalId
+                    && (!Verified.TryGetValue(pair.Key, out CharacterProxyIdentity owner)
+                        || owner.OriginalId != identity.OriginalId
+                        || owner.ResolvedId != identity.ResolvedId))
+                    return false;
+            }
+            return recordedOwner || (!_displayTemplates.ContainsKey(identity.ResolvedId)
+                && !_copyDates.ContainsKey(identity.ResolvedId));
+        }
+
+        private static bool CanMigrateContent(CharacterProxyIdentity identity, int fromId)
+            => fromId == identity.ResolvedId || ContentIdentityMatches(new CharacterProxyIdentity
+            { OriginalId = identity.OriginalId, ResolvedId = fromId });
+
+        internal static void EnsureForDisplay(int taiwuId, int npcId, Action<int, string> completed)
+        {
+            if (taiwuId <= 0 || npcId <= 0 || JianghuYoulingPaths.CurrentWorldId == 0)
+            { completed?.Invoke(npcId, "人物或存档身份尚未就绪"); return; }
+            Action<CharacterProxyIdentity, string> finish = (identity, error) =>
+            {
+                lock (Gate)
+                {
+                    if (error == null && (identity == null || !ContentIdentityMatches(identity)))
+                        error = "人物编号与旧副本资料冲突，已停止串用；原聊天与记忆均已保留";
+                }
+                if (error == null && !ArchivedCharacterStatusStore.ApplyAuthoritative(taiwuId,
+                    identity.IsDead ? null : new[] { identity.ResolvedId },
+                    identity.IsDead ? new[] { identity.ResolvedId } : null, out _))
+                    error = "当前人物生死状态未能可靠同步，请稍后重试";
+                completed?.Invoke(error == null ? identity.ResolvedId : npcId, error);
+            };
+            lock (Gate)
+            {
+                EnsureLoaded(taiwuId);
+                if (Verified.TryGetValue(npcId, out CharacterProxyIdentity identity))
+                { finish(identity, null); return; }
+                if (ReadPending.TryGetValue(npcId, out var callbacks))
+                { callbacks.Add(finish); return; }
+                ReadPending[npcId] = new List<Action<CharacterProxyIdentity, string>> { finish };
+            }
+            ReadBatch(taiwuId, new List<int> { npcId }, null);
+        }
+
+        internal static void Prewarm(int taiwuId)
+        {
+            if (taiwuId <= 0 || JianghuYoulingPaths.CurrentWorldId == 0) return;
+            var ids = new List<int>();
+            lock (Gate)
+            {
+                EnsureLoaded(taiwuId);
+                var seen = new HashSet<int>();
+                foreach (KeyValuePair<int, int> pair in _resolved)
+                {
+                    if (pair.Key > 0 && seen.Add(pair.Key)) ids.Add(pair.Key);
+                    if (pair.Value > 0 && seen.Add(pair.Value)) ids.Add(pair.Value);
+                }
+            }
+            int generation = WorldLifecycle.Generation;
+            uint worldId = JianghuYoulingPaths.CurrentWorldId;
+            int offset = 0;
+            Action next = null;
+            next = () =>
+            {
+                if (!WorldLifecycle.IsSameWorld(generation)
+                    || worldId != JianghuYoulingPaths.CurrentWorldId) return;
+                var batch = new List<int>();
+                lock (Gate)
+                {
+                    while (offset < ids.Count && batch.Count < CharacterProxyIdentity.MaxQueryBatch)
+                    {
+                        int id = ids[offset++];
+                        if (Verified.ContainsKey(id) || ReadPending.ContainsKey(id)) continue;
+                        ReadPending[id] = new List<Action<CharacterProxyIdentity, string>>();
+                        batch.Add(id);
+                    }
+                }
+                if (batch.Count > 0) ReadBatch(taiwuId, batch, ok => { if (ok) next(); });
+            };
+            next();
+        }
+
+        private static void ReadBatch(int taiwuId, List<int> ids, Action<bool> completed)
+        {
+            int generation = WorldLifecycle.Generation;
+            uint worldId = JianghuYoulingPaths.CurrentWorldId;
+            Action<List<CharacterProxyIdentity>, string> receive = (identities, error) =>
+            {
+                if (!WorldLifecycle.IsSameWorld(generation)
+                    || worldId != JianghuYoulingPaths.CurrentWorldId || _taiwuId != taiwuId)
+                    return;
+                var callbacks = new List<Action>();
+                lock (Gate)
+                {
+                    if (error == null && (identities == null || identities.Count != ids.Count))
+                        error = "人物身份查询结果不完整";
+                    for (int index = 0; index < ids.Count; index++)
+                    {
+                        int requestedId = ids[index];
+                        CharacterProxyIdentity identity = error == null ? identities[index] : null;
+                        string rowError = error;
+                        if (rowError == null && (identity == null || identity.RequestedId != requestedId
+                            || !identity.IsValidFor(taiwuId)))
+                            rowError = string.IsNullOrWhiteSpace(identity?.Error)
+                                ? "后端人物身份不一致，未启用映射" : identity.Error;
+                        if (rowError == null && !AcceptVerified(taiwuId, identity))
+                            rowError = "当前人物副本归属冲突，未覆盖已有身份";
+                        if (ReadPending.TryGetValue(requestedId, out var waiters))
+                        {
+                            ReadPending.Remove(requestedId);
+                            foreach (var waiter in waiters)
+                                if (waiter != null) callbacks.Add(() => waiter(identity, rowError));
+                        }
+                    }
+                }
+                foreach (Action callback in callbacks)
+                    try { callback(); } catch { }
+                completed?.Invoke(error == null);
+            };
+            try { EffectHandler.QueryCharacterProxyIdentities(ids, receive); }
+            catch (Exception e) { receive(null, "人物身份查询异常:" + e.GetType().Name); }
+        }
+
+        private static bool AcceptVerified(int taiwuId, CharacterProxyIdentity identity)
+        {
+            if (identity == null || !identity.IsValidFor(taiwuId)) return false;
+            if (!CanAcceptVerified(identity)) return false;
+            Verified[identity.RequestedId] = identity;
+            // These aliases are certified by the same backend observation, not by local id chains.
+            foreach (int id in new[] { identity.OriginalId, identity.ResolvedId })
+                Verified[id] = new CharacterProxyIdentity
+                {
+                    RequestedId = id, OriginalId = identity.OriginalId, ResolvedId = identity.ResolvedId,
+                    DisplayTemplateId = identity.DisplayTemplateId, IsProxy = identity.IsProxy,
+                    RequiresPreparation = identity.RequiresPreparation, IsDead = identity.IsDead,
+                };
+            return true;
+        }
+
+        private static bool CanAcceptVerified(CharacterProxyIdentity identity)
+            => !Verified.TryGetValue(identity.ResolvedId, out CharacterProxyIdentity previous)
+                || previous.OriginalId == identity.OriginalId;
 
         internal static List<int> NormalizeKnownIds(int taiwuId, IEnumerable<int> ids,
             bool includeTaiwu = false)
@@ -118,8 +287,7 @@ namespace JianghuYouling
             if (taiwuId <= 0 || npcId < 0)
             { completed?.Invoke(npcId, "人物身份无效"); return; }
             int known = ResolveKnown(taiwuId, npcId);
-            bool knownValidated;
-            lock (Gate) knownValidated = _validatedProxyIds.Contains(known);
+            bool knownValidated = IsIdentityReady(taiwuId, npcId);
             if (knownValidated)
             {
                 if (known == npcId)
@@ -141,8 +309,12 @@ namespace JianghuYouling
                         lock (Gate) _reconciledOriginals.Add(npcId);
                     }
                     else
+                    {
                         Debug.LogWarning("[江湖有灵] 人物副本状态归并尚未完成，将在下次开窗重试 "
                             + npcId + "→" + known);
+                        completed?.Invoke(npcId, "人物副本状态归并尚未完成，请稍后重试");
+                        return;
+                    }
                 }
                 ChatWindow.NotifyConversationIdentityMigrated(taiwuId, npcId, known);
                 completed?.Invoke(known, null);
@@ -157,7 +329,7 @@ namespace JianghuYouling
 
             uint worldId = JianghuYoulingPaths.CurrentWorldId;
             int generation = WorldLifecycle.Generation;
-            string pendingKey = worldId + ":" + taiwuId + ":" + backendNpcId;
+            string pendingKey = generation + ":" + worldId + ":" + taiwuId + ":" + backendNpcId;
             lock (Gate)
             {
                 if (Pending.TryGetValue(pendingKey, out List<Action<int, string>> waiters))
@@ -181,6 +353,17 @@ namespace JianghuYouling
                             error = "存档已经切换，本次人物副本准备已取消";
                         else if (!ok || resolvedId <= 0)
                             error = string.IsNullOrWhiteSpace(message) ? "人物身份解析失败" : message;
+                        var identity = new CharacterProxyIdentity
+                        {
+                            RequestedId = npcId, OriginalId = originalId, ResolvedId = resolvedId,
+                            DisplayTemplateId = displayTemplateId, IsProxy = isProxy,
+                        };
+                        lock (Gate)
+                        {
+                            if (error == null && (!identity.IsValidFor(taiwuId)
+                                || !CanAcceptVerified(identity) || !ContentIdentityMatches(identity)))
+                                error = "人物副本归属与已有资料冲突，未搬移或覆盖聊天、记忆与立绘";
+                        }
                         // 只有本次后端确实新建的副本才有可证明的复制月份。既有副本不能
                         // 用“本次重新校验月份”冒充创建月份，否则读回更早但仍包含该副本
                         // 的存档时会误删皮肤映射。
@@ -191,11 +374,15 @@ namespace JianghuYouling
                         int migrationSource = migrationFromId > 0
                             ? migrationFromId
                             : (resolvedId != backendNpcId ? backendNpcId : npcId);
-                        // 外部聊天资料可能仍指向上次存档状态中的副本，而本次后端已按
-                        // 原人物解析出另一个权威实体。优先迁移该旧本地身份，再由下方现有
-                        // 分支补迁原人物资料，避免旧聊天留在已失效副本 ID 下。
-                        if (known > 0 && known != npcId && known != resolvedId)
-                            migrationSource = known;
+                        // Only the backend's explicit source/replacement relation authorizes
+                        // content migration. A stale local destination may now be someone else.
+                        lock (Gate)
+                        {
+                            if (error == null && (!CanMigrateContent(identity, migrationSource)
+                                || !CanMigrateContent(identity, stableOriginalId)
+                                || !CanMigrateContent(identity, npcId)))
+                                error = "来源编号下存在其他人物的旧资料，未自动归并或删除";
+                        }
                         if (error == null && resolvedId != migrationSource
                             && !PrepareIdentityContent(taiwuId, migrationSource, resolvedId))
                             error = "人物副本已建立，但聊天、人设或记忆尚未完整迁移；请稍后重试";
@@ -211,14 +398,8 @@ namespace JianghuYouling
                         else if (error == null && !Register(taiwuId, stableOriginalId, resolvedId,
                             displayTemplateId, isProxy, copyDate))
                             error = "人物资料已准备，但副本身份缓存未能写入；请稍后重试";
-                        else if (error == null && known != npcId && known != resolvedId
-                            && !Register(taiwuId, known, resolvedId, displayTemplateId,
-                                isProxy, copyDate))
-                            error = "旧人物副本替换路由未能写入；请稍后重试";
                         else if (error == null)
                         {
-                            if (npcId != stableOriginalId)
-                                RegisterVolatileAlias(npcId, resolvedId);
                             result = resolvedId;
                             bool reconciled = true;
                             if (migrationSource != resolvedId)
@@ -245,12 +426,15 @@ namespace JianghuYouling
                                 {
                                     _reconciledOriginals.Add(npcId);
                                     _reconciledOriginals.Add(stableOriginalId);
-                                    _validatedProxyIds.Add(resolvedId);
+                                    AcceptVerified(taiwuId, identity);
                                 }
                             }
                             else
+                            {
+                                error = "人物副本状态归并尚未完成，请稍后重试";
                                 Debug.LogWarning("[江湖有灵] 人物副本状态归并尚未完成，将在下次开窗重试 "
                                     + migrationSource + "→" + resolvedId);
+                            }
                         }
                     }
                     catch (Exception e)
@@ -279,23 +463,26 @@ namespace JianghuYouling
         internal static void ResetForWorldExit()
         {
             List<Action<int, string>> callbacks = new List<Action<int, string>>();
+            var readers = new List<Action<CharacterProxyIdentity, string>>();
             lock (Gate)
             {
                 foreach (List<Action<int, string>> waiters in Pending.Values)
                     if (waiters != null) callbacks.AddRange(waiters);
                 Pending.Clear();
+                foreach (var waiters in ReadPending.Values) readers.AddRange(waiters);
+                ReadPending.Clear();
+                Verified.Clear();
                 _scope = null;
                 _taiwuId = 0;
                 _resolved = new Dictionary<int, int>();
-                _volatileResolved = new Dictionary<int, int>();
-                _proxyIds = new HashSet<int>();
                 _reconciledOriginals = new HashSet<int>();
-                _validatedProxyIds = new HashSet<int>();
                 _displayTemplates = new Dictionary<int, short>();
                 _copyDates = new Dictionary<int, int>();
             }
             foreach (Action<int, string> callback in callbacks)
                 try { callback?.Invoke(-1, "存档已经切换，本次人物副本准备已取消"); } catch { }
+            foreach (var reader in readers)
+                try { reader?.Invoke(null, "存档已经切换，本次人物身份核验已取消"); } catch { }
         }
 
         internal static void EnsureRoster(int taiwuId, IList<KeyValuePair<int, string>> roster,
@@ -451,10 +638,8 @@ namespace JianghuYouling
                     out short previousTemplate);
                 bool hadCopyDate = _copyDates.TryGetValue(resolvedId,
                     out int previousCopyDate);
-                bool wasKnownProxy = _proxyIds.Contains(resolvedId);
                 _resolved[originalId] = resolvedId;
                 _resolved[resolvedId] = resolvedId;
-                if (isProxy) _proxyIds.Add(resolvedId);
                 if (displayTemplateId >= 0)
                     _displayTemplates[resolvedId] = displayTemplateId;
                 if (isProxy && copyDate >= 0)
@@ -472,15 +657,8 @@ namespace JianghuYouling
                 else _displayTemplates.Remove(resolvedId);
                 if (hadCopyDate) _copyDates[resolvedId] = previousCopyDate;
                 else _copyDates.Remove(resolvedId);
-                if (!wasKnownProxy) _proxyIds.Remove(resolvedId);
                 return false;
             }
-        }
-
-        private static void RegisterVolatileAlias(int originalId, int resolvedId)
-        {
-            if (originalId < 0 || resolvedId < 0 || originalId == resolvedId) return;
-            lock (Gate) _volatileResolved[originalId] = resolvedId;
         }
 
         private static void EnsureLoaded(int taiwuId)
@@ -493,13 +671,11 @@ namespace JianghuYouling
             _scope = scope;
             _taiwuId = taiwuId;
             _resolved = new Dictionary<int, int>();
-            _volatileResolved = new Dictionary<int, int>();
-            _proxyIds = new HashSet<int>();
             _reconciledOriginals = new HashSet<int>();
-            _validatedProxyIds = new HashSet<int>();
+            Verified.Clear();
             _displayTemplates = new Dictionary<int, short>();
             _copyDates = new Dictionary<int, int>();
-            if (!DurableFileStore.TryReadRecoverableText(PathFor(taiwuId), MaxFileBytes,
+            if (!DurableFileStore.TryReadRecoverableTextReadOnly(PathFor(taiwuId), MaxFileBytes,
                 raw => IsValid(raw, taiwuId), out string json, out _, out _))
             {
                 return;
@@ -516,27 +692,13 @@ namespace JianghuYouling
                     _copyDates = state.CopyDates == null
                         ? new Dictionary<int, int>()
                         : new Dictionary<int, int>(state.CopyDates);
-                    // v1 没有复制月份，但其中的路由和原模板皮肤是已经由后端建立过
-                    // 副本的直接证据。保留它们；复制日期仅作记录，不再触发回档删除。
-                    foreach (KeyValuePair<int, int> pair in _resolved)
-                        if (pair.Key != pair.Value && pair.Value > 0)
-                            _proxyIds.Add(pair.Value);
-                    foreach (int proxyId in _copyDates.Keys) _proxyIds.Add(proxyId);
-                    if (state.Version == UntimestampedSchemaVersion)
-                    {
-                        if (Save(taiwuId))
-                            Debug.Log("[江湖有灵] 已保留并升级既有特殊人物皮肤映射 taiwu="
-                                + taiwuId);
-                        else
-                            Debug.LogWarning("[江湖有灵] 既有特殊人物皮肤映射暂未完成格式升级 taiwu="
-                                + taiwuId);
-                    }
+                    // Keep historical content bindings untouched, but never publish them as
+                    // runtime routes or skins until the current backend confirms ownership.
                 }
             }
             catch
             {
                 _resolved.Clear();
-                _proxyIds.Clear();
                 _displayTemplates.Clear();
                 _copyDates.Clear();
             }
@@ -564,8 +726,7 @@ namespace JianghuYouling
                 JObject root = JObject.Parse(json);
                 State state = root.ToObject<State>();
                 if (state == null
-                    || (state.Version != SchemaVersion
-                        && state.Version != UntimestampedSchemaVersion)
+                    || state.Version != SchemaVersion
                     || state.WorldId == 0
                     || state.WorldId != JianghuYoulingPaths.CurrentWorldId
                     || state.TaiwuId != taiwuId || state.Resolved == null

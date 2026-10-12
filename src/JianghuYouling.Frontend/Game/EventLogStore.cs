@@ -135,6 +135,29 @@ namespace JianghuYouling
             catch (Exception e2) { Debug.LogWarning("[江湖有灵] 纪事幂等提交失败: " + e2.GetType().Name); return false; }
         }
 
+        public static bool EnsureFanoutEntry(int taiwuId, EventFanoutCheckpoint checkpoint)
+        {
+            if (taiwuId <= 0 || !EventFanoutPolicy.IsValid(checkpoint)) return false;
+            lock (Sync)
+            {
+                // The checkpoint flag is not proof that a separately stored archive row still
+                // exists. Reconstruct a missing row from the frozen facts, but never overwrite
+                // an existing row's generated detail, companion digest or stop reason.
+                foreach (EventLogEntry entry in Load(taiwuId))
+                    if (entry != null && string.Equals(entry.EventId, checkpoint.EventId, StringComparison.Ordinal))
+                        return entry.Date == checkpoint.WorldDate;
+                string brief = checkpoint.Actions.Count > 0 && !string.IsNullOrWhiteSpace(checkpoint.Actions[0])
+                    ? checkpoint.Actions[0] : checkpoint.StoryText;
+                if (brief.Length > 160) brief = brief.Substring(0, 160) + "…";
+                return Upsert(taiwuId, new EventLogEntry
+                {
+                    EventId = checkpoint.EventId, Date = checkpoint.WorldDate, Area = checkpoint.AreaName,
+                    Text = "", Detail = "", Brief = brief, Roster = checkpoint.Roster,
+                    Actions = new List<string>(checkpoint.Actions), Heard = checkpoint.Heard,
+                });
+            }
+        }
+
         // JHYL_MONTHLY_DIGEST_ARCHIVE: 把已完成的同道结果增量并入同月纪事。它不改写江湖
         // 事件正文或动作回执；事件关闭/尚未完成时使用稳定的仅总览记录，后续可无损合并。
         public static bool UpsertMonthlyDigest(int taiwuId, int date, IList<CompanionMonthlyResult> companions)
@@ -243,6 +266,7 @@ namespace JianghuYouling
                     if (entry != null && string.Equals(entry.EventId, eventId, StringComparison.Ordinal))
                     { found = entry; break; }
                 if (found == null) return false;
+                if (found.Heard == heard) return true;
                 found.Heard = heard;
                 return SaveAll(taiwuId, list);
             }
