@@ -9,4 +9,12 @@
     <StartupObject>JianghuYouling.BackendContractTests.BackendCombatContractTests</StartupObject>
   </PropertyGroup>
 
+  <ItemGroup>
+    <Compile Include="..\..\src\JianghuYouling.Backend\CharacterProxyArchiveReader.cs" Link="CharacterProxyArchiveReader.cs" />
+    <Compile Include="..\..\src\JianghuYouling.Core\Behavior\CharacterProxyIdentity.cs" Link="CharacterProxyIdentity.cs" />
+    <Reference Include="GameData.Shared"><HintPath>$(TaiwuGameDir)\Backend\GameData.Shared.dll</HintPath><Private>true</Private></Reference>
+    <Reference Include="GameData.Serializer"><HintPath>$(TaiwuGameDir)\Backend\GameData.Serializer.dll</HintPath><Private>true</Private></Reference>
+    <Reference Include="GameData.Utilities"><HintPath>$(TaiwuGameDir)\Backend\GameData.Utilities.dll</HintPath><Private>true</Private></Reference>
+  </ItemGroup>
+
 </Project>

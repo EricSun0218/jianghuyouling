@@ -40,7 +40,7 @@ namespace JianghuYouling.Backend
     /// 《江湖有灵》后端薄插件:跑在后端逻辑线程,持有真实游戏域(Character/Taiwu…)。
     /// 仅暴露需后端权限的写操作 + RPC 入口。M1 先只有一个 Ping 验证前后端通路。
     /// </summary>
-    [PluginConfig("江湖有灵 Backend", "jianghuyouling", "0.34.0.30")]
+    [PluginConfig("江湖有灵 Backend", "jianghuyouling", "0.34.0.31")]
     public sealed class BackendPluginMain : TaiwuRemakePlugin
     {
         private const int DefaultNpcTravelDurationMonths = 6;
@@ -5210,35 +5210,33 @@ namespace JianghuYouling.Backend
         private static string CharacterProxyPendingLegacyKey(int sourceId)
             => CharacterProxyPendingLegacyPrefix + sourceId.ToString(CultureInfo.InvariantCulture);
 
+        private static readonly FieldInfo CharacterProxyArchiveField = typeof(ModDomain).GetField(
+            "_archiveModDataDict", BindingFlags.Instance | BindingFlags.NonPublic);
+
+        private static bool TryGetCharacterProxyArchiveInt(string key, out int value)
+        {
+            string modId = string.IsNullOrWhiteSpace(_modIdStr) ? RpcConst.FallbackModId : _modIdStr;
+            ModId current = CharacterProxyArchiveReader.ResolveLoadedMod(ModDomain.GetLoadedModIds(), modId);
+            // Fetch from the live domain on every read: never retain a previous world's buckets.
+            var archive = CharacterProxyArchiveField?.GetValue(DomainManager.Mod)
+                as IReadOnlyDictionary<ModId, SerializableModData>;
+            return CharacterProxyArchiveReader.TryGetInt(archive, current, key, out value);
+        }
 
         private static bool TryGetReplacementProxy(int legacyProxyId, out int replacementId)
         {
             replacementId = 0;
             if (legacyProxyId <= 0) return false;
-            string modId = string.IsNullOrWhiteSpace(_modIdStr)
-                ? RpcConst.FallbackModId : _modIdStr;
-            try
-            {
-                return DomainManager.Mod.TryGet(modId,
-                    CharacterProxyReplacementKey(legacyProxyId), true, out replacementId)
-                    && replacementId > 0;
-            }
-            catch { replacementId = 0; return false; }
+            return TryGetCharacterProxyArchiveInt(CharacterProxyReplacementKey(legacyProxyId), out replacementId)
+                && replacementId > 0;
         }
 
         private static bool TryGetPendingLegacyProxy(int sourceId, out int legacyProxyId)
         {
             legacyProxyId = 0;
             if (sourceId <= 0) return false;
-            string modId = string.IsNullOrWhiteSpace(_modIdStr)
-                ? RpcConst.FallbackModId : _modIdStr;
-            try
-            {
-                return DomainManager.Mod.TryGet(modId,
-                    CharacterProxyPendingLegacyKey(sourceId), true, out legacyProxyId)
-                    && legacyProxyId > 0;
-            }
-            catch { legacyProxyId = 0; return false; }
+            return TryGetCharacterProxyArchiveInt(CharacterProxyPendingLegacyKey(sourceId), out legacyProxyId)
+                && legacyProxyId > 0;
         }
 
         private static bool PersistCharacterProxySource(DataContext context,
@@ -5270,26 +5268,16 @@ namespace JianghuYouling.Backend
         {
             proxyId = 0;
             if (sourceId <= 0) return false;
-            string modId = string.IsNullOrWhiteSpace(_modIdStr) ? RpcConst.FallbackModId : _modIdStr;
-            try
-            {
-                return DomainManager.Mod.TryGet(modId, CharacterProxySourceKey(sourceId), true, out proxyId)
-                    && proxyId > 0;
-            }
-            catch { proxyId = 0; return false; }
+            return TryGetCharacterProxyArchiveInt(CharacterProxySourceKey(sourceId), out proxyId)
+                && proxyId > 0;
         }
 
         internal static bool TryGetCharacterProxySource(int proxyId, out int sourceId)
         {
             sourceId = 0;
             if (proxyId <= 0) return false;
-            string modId = string.IsNullOrWhiteSpace(_modIdStr) ? RpcConst.FallbackModId : _modIdStr;
-            try
-            {
-                return DomainManager.Mod.TryGet(modId, CharacterProxyReverseKey(proxyId), true, out sourceId)
-                    && sourceId > 0;
-            }
-            catch { sourceId = 0; return false; }
+            return TryGetCharacterProxyArchiveInt(CharacterProxyReverseKey(proxyId), out sourceId)
+                && sourceId > 0;
         }
 
         internal static bool IsCharacterProxy(int characterId)
@@ -5417,13 +5405,10 @@ namespace JianghuYouling.Backend
         /// </summary>
         private static bool IsCharacterProxyAwaitingFirstJoin(int proxyId)
         {
-            if (!TryGetCharacterProxySource(proxyId, out _)) return false;
-            string modId = string.IsNullOrWhiteSpace(_modIdStr)
-                ? RpcConst.FallbackModId : _modIdStr;
             try
             {
-                return !DomainManager.Mod.TryGet(modId,
-                    CharacterProxyEverJoinedKey(proxyId), true, out int joined)
+                if (!TryGetCharacterProxySource(proxyId, out _)) return false;
+                return !TryGetCharacterProxyArchiveInt(CharacterProxyEverJoinedKey(proxyId), out int joined)
                     || joined == 0;
             }
             catch
@@ -10957,17 +10942,17 @@ namespace JianghuYouling.Backend
     {
         private static bool Prefix(DataContext context, Character character, ref ItemKey __result)
         {
-            if (character == null || !BackendPluginMain.IsCharacterProxy(character.GetId()))
-                return true;
             try
             {
+                if (character == null || !BackendPluginMain.IsCharacterProxy(character.GetId()))
+                    return true;
                 int characterId = character.GetId();
                 if (DomainManager.Taiwu.IsInGroup(characterId))
                     DomainManager.Taiwu.LeaveGroup(context, characterId);
             }
             catch
             {
-                // 保护后端主循环优先；保留人物实体，仍可从江湖有灵的离队工具重试。
+                // 身份读取或离队失败时均不销毁实体，也不把异常带进本体主循环。
             }
             __result = default;
             return false;
@@ -10985,15 +10970,23 @@ namespace JianghuYouling.Backend
         private static void Prefix(CharacterDomain __instance)
         {
             if (__instance?.Characters == null) return;
-            foreach (KeyValuePair<int, Character> pair in __instance.Characters)
+            try
             {
-                Character character = pair.Value;
-                if (character == null || character.GetCreatingType() != 0) continue;
-                short templateId = character.GetTemplateId();
-                if (templateId < 0 || templateId >= Config.Character.Instance.Count
-                    || Config.Character.Instance[templateId].CreatingType != 0) continue;
-                if (BackendPluginMain.TryGetCharacterProxySource(pair.Key, out _))
-                    character.OfflineSetCreatingType(1);
+                foreach (KeyValuePair<int, Character> pair in __instance.Characters)
+                {
+                    Character character = pair.Value;
+                    if (character == null || character.GetCreatingType() != 0) continue;
+                    short templateId = character.GetTemplateId();
+                    if (templateId < 0 || templateId >= Config.Character.Instance.Count
+                        || Config.Character.Instance[templateId].CreatingType != 0) continue;
+                    if (BackendPluginMain.TryGetCharacterProxySource(pair.Key, out _))
+                        character.OfflineSetCreatingType(1);
+                }
+            }
+            catch (Exception e)
+            {
+                // Mod 存档域可能尚未加载完成。没有可靠身份就不转换，也不阻断加载。
+                AdaptableLog.Warning("[JHYL_PROXY_LOAD_IDENTITY_UNAVAILABLE] " + e.GetType().Name);
             }
         }
     }

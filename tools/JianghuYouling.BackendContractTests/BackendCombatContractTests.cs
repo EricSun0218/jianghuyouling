@@ -12,9 +12,11 @@ namespace JianghuYouling.BackendContractTests
         {
             try
             {
+                CharacterProxyArchiveTests.Run();
                 string root = FindRepositoryRoot();
                 string rpc = Read(root, "src", "Shared", "RpcConst.cs");
                 string backend = Read(root, "src", "JianghuYouling.Backend", "BackendPluginMain.cs");
+                CharacterProxyArchiveTests.VerifyIntegration(backend);
                 string effects = Read(root, "src", "JianghuYouling.Frontend", "Effects", "EffectHandler.cs");
                 string operationRpc = Read(root, "src", "JianghuYouling.Frontend", "Rpc", "OperationRpcClient.cs");
                 string talk = Read(root, "src", "JianghuYouling.Frontend", "Talk", "TalkOrchestrator.cs");
