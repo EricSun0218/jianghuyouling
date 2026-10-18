@@ -24,10 +24,13 @@ namespace JianghuYouling.DevTest
             TaiwuAndConflictingOwnersAreRejected();
             ReadFailureCannotFallBackToDisk();
             ConfirmedMissingAnchorRetainsSkinAndCurrentLifeState();
+            ConfirmedOwnerSurvivesStaleHistoricalAliases();
+            HistoricalAliasesCannotAuthorizeAnUnrecordedOwner();
+            HistoricalAliasesCannotAuthorizeContentMigration();
             LateReadCannotCrossReload();
             LateCreationCannotConsumeNewWaiters();
             PrewarmIsBoundedAndReadOnly();
-            Console.WriteLine("[PASS] Proxy authority: reused ids, owner collisions, Taiwu guards, read failures, reload races and bounded prewarm");
+            Console.WriteLine("[PASS] Proxy authority: historical aliases, reused ids, owner collisions, Taiwu guards, read failures, reload races and bounded prewarm");
         }
 
         private static CharacterProxyIdentity Plain(int id, bool prepare = false)
@@ -279,6 +282,100 @@ namespace JianghuYouling.DevTest
                 CharacterProxyIdentityService.EnsureForDisplay(Taiwu, Source, (_, error) => Check(error == null, "alive proxy can open"));
                 Check(!ArchivedCharacterStatusStore.IsDead(Taiwu, OldProxy),
                     "current backend life state overrides rollback-stale soul marker");
+            }
+        }
+
+        private static void ConfirmedOwnerSurvivesStaleHistoricalAliases()
+        {
+            using (var fixture = new Fixture())
+            {
+                const int missingAlias = 15429, redirectedAlias = 15430, otherProxy = 19524;
+                foreach (int id in new[] { Source, OtherSource, missingAlias, redirectedAlias })
+                    fixture.Bind(id, OldProxy, 55);
+                fixture.SetProxy(Source, OldProxy, -1); // The current owner survives without a live story anchor.
+                fixture.Answers[OtherSource] = Plain(OtherSource, true);
+                fixture.Answers[missingAlias] = new CharacterProxyIdentity
+                    { RequestedId = missingAlias, Error = "人物已失效" };
+                fixture.SetProxy(redirectedAlias, otherProxy, 66);
+                foreach (int id in new[] { Source, OtherSource, missingAlias, redirectedAlias, OldProxy })
+                    fixture.SeedContent(id);
+                Directory.CreateDirectory(JianghuYoulingPaths.ChatLogs);
+                string chat = Path.Combine(JianghuYoulingPaths.ChatLogs, "Chat_" + Taiwu + "_" + OldProxy + ".json");
+                File.WriteAllText(chat, "{\"messages\":[{\"role\":\"user\",\"content\":\"existing proxy chat\"}]}");
+                var preserved = Directory.GetFiles(fixture.Root, "*", SearchOption.AllDirectories)
+                    .ToDictionary(path => path, File.ReadAllBytes);
+                fixture.Reload();
+
+                Check(!CharacterProxyIdentityService.TryGetDisplayTemplate(Taiwu, OldProxy, out _),
+                    "historic aliases alone still cannot authorize a cached portrait");
+                // First open must not depend on prewarm having queried every historical alias.
+                int opened = 0; string error = null;
+                CharacterProxyIdentityService.EnsureForDisplay(Taiwu, OldProxy,
+                    (id, failure) => { opened = id; error = failure; });
+                Check(error == null && opened == OldProxy, "confirmed recorded owner can open before alias prewarm");
+                for (int reload = 0; reload < 2; reload++)
+                {
+                    if (reload > 0) fixture.Reload();
+                    CharacterProxyIdentityService.Prewarm(Taiwu);
+                    Check(CharacterProxyIdentityService.TryGetDisplayTemplate(Taiwu, OldProxy, out short skin) && skin == 55,
+                        "missing, unrelated and redirected aliases do not hide the confirmed owner's cached skin");
+                    CharacterProxyIdentityService.EnsureForDisplay(Taiwu, OldProxy,
+                        (id, failure) => { opened = id; error = failure; });
+                    Check(error == null && opened == OldProxy, "confirmed proxy stays openable after prewarm and reload");
+                    Check(CharacterProxyIdentityService.IsIdentityReady(Taiwu, OldProxy),
+                        "existing proxy is ready for sending despite stale historical aliases");
+                    CharacterProxyIdentityService.EnsureForConversation(Taiwu, OldProxy,
+                        (id, failure) => { opened = id; error = failure; });
+                    Check(error == null && opened == OldProxy && fixture.MutationCalls == 0,
+                        "sending to the existing proxy needs neither creation nor identity migration");
+                    Check(CharacterProxyIdentityService.ResolveKnown(Taiwu, OtherSource) == OtherSource
+                        && CharacterProxyIdentityService.ResolveKnown(Taiwu, missingAlias) == missingAlias
+                        && CharacterProxyIdentityService.ResolveKnown(Taiwu, redirectedAlias) == otherProxy,
+                        "historic aliases do not become live routes or merge independent identities");
+                    Check(TalkOrchestrator.MigratedNpcIdsForTest.Count == 0
+                        && TalkOrchestrator.FinalizedNpcIdsForTest.Count == 0,
+                        "opening and sending never merge or remove historical source data");
+                    AssertUnchanged(preserved);
+                }
+            }
+        }
+
+        private static void HistoricalAliasesCannotAuthorizeAnUnrecordedOwner()
+        {
+            using (var fixture = new Fixture())
+            {
+                fixture.Bind(OtherSource, OldProxy, 55);
+                fixture.Bind(15429, OldProxy, 55);
+                var preserved = fixture.SeedContent(OldProxy);
+                fixture.SetProxy(Source, OldProxy, -1);
+                fixture.Reload();
+                string error = null;
+                CharacterProxyIdentityService.EnsureForDisplay(Taiwu, OldProxy, (_, failure) => error = failure);
+                Check(!string.IsNullOrWhiteSpace(error), "unrelated old aliases do not prove the current owner's content binding");
+                Check(!CharacterProxyIdentityService.TryGetDisplayTemplate(Taiwu, OldProxy, out _),
+                    "a new owner cannot borrow an unverified historical portrait");
+                Check(fixture.MutationCalls == 0, "rejected display never recreates or repairs a proxy");
+                AssertUnchanged(preserved);
+            }
+        }
+
+        private static void HistoricalAliasesCannotAuthorizeContentMigration()
+        {
+            using (var fixture = new Fixture())
+            {
+                const int newProxy = 19523;
+                fixture.Bind(Source, OldProxy, 55);
+                fixture.Bind(OtherSource, OldProxy, 55);
+                var preserved = fixture.SeedContent(OldProxy);
+                fixture.Reload();
+                fixture.Create = (id, done) => done(true, Source, newProxy, false, true, OldProxy, 55, null);
+                string error = null;
+                CharacterProxyIdentityService.EnsureForConversation(Taiwu, Source, (_, failure) => error = failure);
+                Check(!string.IsNullOrWhiteSpace(error), "a shared historical target is still rejected as a migration donor");
+                Check(TalkOrchestrator.MigratedNpcIdsForTest.Count == 0
+                    && TalkOrchestrator.FinalizedNpcIdsForTest.Count == 0,
+                    "retaining current content must not authorize migration or deletion of ambiguous old data");
+                AssertUnchanged(preserved);
             }
         }
 

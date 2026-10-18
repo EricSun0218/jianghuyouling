@@ -40,7 +40,7 @@ namespace JianghuYouling.Backend
     /// 《江湖有灵》后端薄插件:跑在后端逻辑线程,持有真实游戏域(Character/Taiwu…)。
     /// 仅暴露需后端权限的写操作 + RPC 入口。M1 先只有一个 Ping 验证前后端通路。
     /// </summary>
-    [PluginConfig("江湖有灵 Backend", "jianghuyouling", "0.34.0.31")]
+    [PluginConfig("江湖有灵 Backend", "jianghuyouling", "0.34.0.32")]
     public sealed class BackendPluginMain : TaiwuRemakePlugin
     {
         private const int DefaultNpcTravelDurationMonths = 6;
@@ -5896,12 +5896,41 @@ namespace JianghuYouling.Backend
             return false;
         }
 
+        /// <summary>
+        /// 只有正式江湖世界(GameWorldType=1)才允许建立人物副本。新手教程世界(2)由
+        /// TutorialChapterDomain.CreateFixedWorld 建立，不会调用 CreatePregeneratedRandomEnemies，
+        /// 预生成护卫/随机敌人表为空；教程里原生人物全是固定模板，不会走护卫计算，
+        /// 但副本是 CreatingType=1 的智能人物，地图格人物列表一刷新就会在
+        /// GetCharacterDisplayDataForGuard → GetPregeneratedRandomEnemy 越界，导致后端进程崩溃。
+        /// 游戏内指引世界(3)是临时存档，同样不应写入副本。
+        /// </summary>
+        private static bool IsRegularWorldForCharacterProxy(out string error)
+        {
+            error = null;
+            try
+            {
+                sbyte worldType = DomainManager.Global.GetCurrGameWorldType();
+                if (worldType == 1) return true;
+                error = worldType == 2
+                    ? "新手教程中不能与特殊人物建立人物副本（AI 对话/互动记录），请在教程结束、进入正式江湖后再试"
+                    : "当前不是正式江湖世界，不能建立人物副本";
+                return false;
+            }
+            catch (Exception e)
+            {
+                error = "无法确认当前世界类型，未建立人物副本:" + e.GetType().Name;
+                return false;
+            }
+        }
+
         private static Character CreateLegalCharacterProxy(DataContext context,
             Character source, out string error)
         {
             error = null;
             if (context == null || source == null)
             { error = "人物副本创建参数不完整"; return null; }
+            if (!IsRegularWorldForCharacterProxy(out string worldError))
+            { error = worldError; return null; }
 
             Character taiwu = DomainManager.Taiwu.GetTaiwu();
             // 副本是在太吾与特殊人物实际接触时建立。只采用太吾当前有效位置，失效时
@@ -6417,6 +6446,8 @@ namespace JianghuYouling.Backend
                     false, false, "普通人物直接使用原实体",
                     requestedId != canonicalSourceId ? requestedId : 0);
 
+            if (!IsRegularWorldForCharacterProxy(out string worldError))
+                return Fail("character_proxy_non_regular_world", worldError);
             Character proxy = CreateLegalCharacterProxy(context, source, out string createError);
             if (proxy == null || proxy.GetId() <= 0 || proxy.GetId() == canonicalSourceId)
                 return Indeterminate("character_proxy_create_postcondition",

@@ -115,28 +115,38 @@ namespace JianghuYouling
             }
         }
 
-        // A reused destination must never inherit another person's chat, portrait or memory.
-        // Ambiguous old content stays on disk; only a current authoritative alias can share it.
         private static bool ContentIdentityMatches(CharacterProxyIdentity identity)
+        {
+            // The caller has a current backend observation. An exact recorded owner/proxy
+            // pair may keep using its own content even if other historical inbound aliases
+            // have disappeared or now resolve elsewhere. Those aliases are not live routes.
+            if (identity.IsProxy && _resolved.TryGetValue(identity.OriginalId, out int recordedProxy)
+                && recordedProxy == identity.ResolvedId)
+                return true;
+            return HistoricalContentOwnersMatch(identity.OriginalId, identity.ResolvedId);
+        }
+
+        // Moving old content still requires every recorded owner to match. Allowing a current
+        // proxy to retain its content must not also authorize a historical merge or deletion.
+        private static bool HistoricalContentOwnersMatch(int originalId, int resolvedId)
         {
             bool recordedOwner = false;
             foreach (KeyValuePair<int, int> pair in _resolved)
             {
-                if (pair.Key == pair.Value || pair.Value != identity.ResolvedId) continue;
+                if (pair.Key == pair.Value || pair.Value != resolvedId) continue;
                 recordedOwner = true;
-                if (pair.Key != identity.OriginalId
+                if (pair.Key != originalId
                     && (!Verified.TryGetValue(pair.Key, out CharacterProxyIdentity owner)
-                        || owner.OriginalId != identity.OriginalId
-                        || owner.ResolvedId != identity.ResolvedId))
+                        || owner.OriginalId != originalId
+                        || owner.ResolvedId != resolvedId))
                     return false;
             }
-            return recordedOwner || (!_displayTemplates.ContainsKey(identity.ResolvedId)
-                && !_copyDates.ContainsKey(identity.ResolvedId));
+            return recordedOwner || (!_displayTemplates.ContainsKey(resolvedId)
+                && !_copyDates.ContainsKey(resolvedId));
         }
 
         private static bool CanMigrateContent(CharacterProxyIdentity identity, int fromId)
-            => fromId == identity.ResolvedId || ContentIdentityMatches(new CharacterProxyIdentity
-            { OriginalId = identity.OriginalId, ResolvedId = fromId });
+            => fromId == identity.ResolvedId || HistoricalContentOwnersMatch(identity.OriginalId, fromId);
 
         internal static void EnsureForDisplay(int taiwuId, int npcId, Action<int, string> completed)
         {
