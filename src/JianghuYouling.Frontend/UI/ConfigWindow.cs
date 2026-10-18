@@ -29,14 +29,15 @@ namespace JianghuYouling
         static TextMeshProUGUI _title, _status, _presetSelectionHint;
         static TMP_InputField _baseUrl, _apiKey, _model, _bgModel, _maxTokens, _contextWindow, _profileNameInput, _voiceInput, _wbInput = null, _personaInput, _asstNameInput, _asstFacePathInput, _asstPersonaInput, _ttsBase, _ttsKey, _ttsModel, _imageProvider, _imageEndpoint, _imageKey, _imageModel, _imageSize, _imageWorkflowPath, _imageStyle, _companionMonthlyCountInput;
         static GameObject _asstPersonaInputGo;
-        static Button _saveBtn, _testBtn, _profilePrevBtn, _profileNextBtn, _profileActivateBtn, _profileSaveBtn, _profileDeleteBtn, _diffBtn, _streamBtn, _replyLenBtn, _fontSizeBtn, _ghostwriteLenBtn, _ghostwriteLearningBtn, _thinkBtn, _aiEventBtn, _companionMonthlyBtn, _monthlyPopupBtn, _monthlyCandidateManagerBtn, _wbStructuredBtn = null, _wbResetBtn = null, _personaResetBtn, _asstEnabledBtn, _asstFreqBtn, _asstCommissionIntervalBtn, _asstFaceResetBtn, _groupRoundsBtn, _npcProactiveEnabledBtn, _npcProactiveFreqBtn, _imageWatermarkBtn;
+        static Button _saveBtn, _testBtn, _profileActivateBtn, _profileSaveBtn, _profileDeleteBtn, _diffBtn, _streamBtn, _replyLenBtn, _fontSizeBtn, _ghostwriteLenBtn, _ghostwriteLearningBtn, _thinkBtn, _aiEventBtn, _companionMonthlyBtn, _monthlyPopupBtn, _monthlyCandidateManagerBtn, _wbStructuredBtn = null, _wbResetBtn = null, _personaResetBtn, _asstEnabledBtn, _asstFreqBtn, _asstCommissionIntervalBtn, _asstFaceResetBtn, _groupRoundsBtn, _npcProactiveEnabledBtn, _npcProactiveFreqBtn, _imageWatermarkBtn;
+        static TMP_Dropdown _profileDropdown;
         static Button _thinkingPromptBtn;
         static Button _ttsDialogueOnlyBtn;
         static Button _economyPresetBtn, _balancedPresetBtn, _bestExperiencePresetBtn;
         static GameObject[] _panes;
         static Image[] _navImgs;
         static GameObject _personaInputGo, _wbInputGo = null;
-        static TextMeshProUGUI _personaTitle, _personaHint, _wbHint = null, _profileSelectionLabel;
+        static TextMeshProUGUI _personaTitle, _personaHint, _wbHint = null;
         static readonly List<string> _profileNames = new List<string>();
         static int _profileIndex = -1;
         static string _pendingProfileDelete;
@@ -1499,23 +1500,27 @@ namespace JianghuYouling
         static void UpdateLlmProfileControls(string error = null)
         {
             bool any = _profileIndex >= 0 && _profileIndex < _profileNames.Count;
-            if (_profileSelectionLabel != null)
-                _profileSelectionLabel.text = error != null ? "档案读取失败"
-                    : any ? _profileNames[_profileIndex] : "暂无已保存档案";
-            if (_profilePrevBtn != null) _profilePrevBtn.interactable = any && !_testing;
-            if (_profileNextBtn != null) _profileNextBtn.interactable = any && !_testing;
+            if (_profileDropdown != null)
+            {
+                _profileDropdown.Hide();
+                _profileDropdown.ClearOptions();
+                _profileDropdown.AddOptions(any ? new List<string>(_profileNames)
+                    : new List<string> { error != null ? "档案读取失败" : "暂无已保存档案" });
+                _profileDropdown.SetValueWithoutNotify(any ? _profileIndex : 0);
+                _profileDropdown.RefreshShownValue();
+                _profileDropdown.interactable = any && !_testing && !_savingDocuments
+                    && !_wbLoading && !_personaLoading;
+            }
             if (_profileActivateBtn != null) _profileActivateBtn.interactable = any && !_testing;
             if (_profileDeleteBtn != null) _profileDeleteBtn.interactable = any && !_testing;
         }
 
-        static void CycleLlmProfile(int delta)
+        static void SelectLlmProfile(int index)
         {
-            if (_profileNames.Count == 0) return;
-            _profileIndex = (_profileIndex + delta) % _profileNames.Count;
-            if (_profileIndex < 0) _profileIndex += _profileNames.Count;
+            if (index < 0 || index >= _profileNames.Count || _testing || _savingDocuments) return;
+            _profileIndex = index;
             _pendingProfileDelete = null;
             SetButtonText(_profileDeleteBtn, "删除档案");
-            UpdateLlmProfileControls();
         }
 
         static void SaveCurrentLlmProfile()
@@ -1685,8 +1690,11 @@ namespace JianghuYouling
             if (_saveBtn != null) _saveBtn.interactable = ready;
             if (_testBtn != null) _testBtn.interactable = ready;
             if (_profileSaveBtn != null) _profileSaveBtn.interactable = ready;
-            if (_profilePrevBtn != null) _profilePrevBtn.interactable = ready && _profileNames.Count > 0;
-            if (_profileNextBtn != null) _profileNextBtn.interactable = ready && _profileNames.Count > 0;
+            if (_profileDropdown != null)
+            {
+                if (!ready) _profileDropdown.Hide();
+                _profileDropdown.interactable = ready && _profileNames.Count > 0;
+            }
             if (_profileActivateBtn != null) _profileActivateBtn.interactable = ready && _profileNames.Count > 0;
             if (_profileDeleteBtn != null) _profileDeleteBtn.interactable = ready && _profileNames.Count > 0;
             if (_wbResetBtn != null)
@@ -1717,7 +1725,12 @@ namespace JianghuYouling
                 _imageProvider, _imageEndpoint, _imageKey, _imageModel, _imageSize, _imageWorkflowPath, _imageStyle,
                 _companionMonthlyCountInput })
                 if (input != null) input.interactable = enabled;
-            foreach (Button button in new[] { _profilePrevBtn, _profileNextBtn, _profileActivateBtn,
+            if (_profileDropdown != null)
+            {
+                if (!enabled) _profileDropdown.Hide();
+                _profileDropdown.interactable = enabled && !_testing && _profileNames.Count > 0;
+            }
+            foreach (Button button in new[] { _profileActivateBtn,
                 _profileSaveBtn, _profileDeleteBtn, _diffBtn, _streamBtn, _replyLenBtn, _fontSizeBtn, _ghostwriteLenBtn, _ghostwriteLearningBtn, _thinkBtn,
                 _aiEventBtn, _companionMonthlyBtn, _monthlyPopupBtn, _monthlyCandidateManagerBtn,
                 _wbStructuredBtn, _asstEnabledBtn, _asstFreqBtn,
@@ -1835,21 +1848,10 @@ namespace JianghuYouling
             profileTitle.text = "模型配置档案（密钥仍以 Windows DPAPI 加密保存）";
             profileTitle.color = new Color(0.80f, 0.78f, 0.70f, 1f);
 
-            // Use ASCII arrows: the game's Font SDF GB2312 does not contain U+2039/U+203A,
-            // which otherwise emits a TMP warning every time this pane is rendered.
-            GameObject prev = NewButton("ProfilePrev", pane.transform, "<", 22, out _profilePrevBtn);
-            Anchor(prev.GetComponent<RectTransform>(), new Vector2(0, 1), new Vector2(0, 1),
-                new Vector2(4, -64), new Vector2(44, -32));
-            _profilePrevBtn.onClick.AddListener(() => CycleLlmProfile(-1));
-            _profileSelectionLabel = NewText("ProfileSelection", pane.transform, 16,
-                TextAlignmentOptions.Center);
-            Anchor(_profileSelectionLabel.rectTransform, new Vector2(0, 1), new Vector2(0, 1),
-                new Vector2(50, -64), new Vector2(300, -32));
-            _profileSelectionLabel.color = new Color(0.88f, 0.84f, 0.70f, 1f);
-            GameObject next = NewButton("ProfileNext", pane.transform, ">", 22, out _profileNextBtn);
-            Anchor(next.GetComponent<RectTransform>(), new Vector2(0, 1), new Vector2(0, 1),
-                new Vector2(306, -64), new Vector2(346, -32));
-            _profileNextBtn.onClick.AddListener(() => CycleLlmProfile(1));
+            _profileDropdown = ModelProfileDropdown.Create(pane.transform, _font);
+            Anchor(_profileDropdown.GetComponent<RectTransform>(), new Vector2(0, 1), new Vector2(0, 1),
+                new Vector2(4, -64), new Vector2(346, -32));
+            _profileDropdown.onValueChanged.AddListener(SelectLlmProfile);
             GameObject activate = NewButton("ProfileActivate", pane.transform, "立即切换", 15,
                 out _profileActivateBtn);
             Anchor(activate.GetComponent<RectTransform>(), new Vector2(0, 1), new Vector2(0, 1),

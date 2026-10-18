@@ -37,6 +37,11 @@ namespace JianghuYouling.DevTest
             Console.OutputEncoding = System.Text.Encoding.UTF8;
             try
             {
+            if (args != null && Array.Exists(args, a => string.Equals(a, "--telemetry-only", StringComparison.OrdinalIgnoreCase)))
+            {
+                await TelemetryTests.Run();
+                return 0;
+            }
             // 联网冒烟由 full-mod-e2e 在完整离线套件之后单独调用；这里必须先分流，
             // 避免每次真实接口重试都重复执行整套离线回归并放大总耗时。
             string liveBaseUrl = OptionValue(args, "--live-base-url");
@@ -305,6 +310,7 @@ namespace JianghuYouling.DevTest
                 return 0;
             }
 
+            await TelemetryTests.Run();
             MonthlyRecoveryTests.Run();
             TestInfluence();
             TestDeadCleanup();
@@ -12216,10 +12222,17 @@ namespace JianghuYouling.DevTest
                     StringSplitOptions.None).Length - 1) >= 4
                     && !config.Contains("ArmFirstClickSelectAll(_asstPersonaInput);"))
                     .ToString(), "True");
-            AssertEq("设置页档案翻页不使用本体字体缺失的 U+2039/U+203A",
+            AssertEq("模型档案使用下拉选择，移除左右翻页按钮",
                 (!config.Contains("\"‹\"") && !config.Contains("\"›\"")
-                    && config.Contains("\"ProfilePrev\", pane.transform, \"<\"")
-                    && config.Contains("\"ProfileNext\", pane.transform, \">\"")).ToString(), "True");
+                    && !config.Contains("ProfilePrev") && !config.Contains("ProfileNext")
+                    && config.Contains("ModelProfileDropdown.Create(pane.transform, _font)")
+                    && config.Contains("onValueChanged.AddListener(SelectLlmProfile)")
+                    && config.Contains("SetValueWithoutNotify(any ? _profileIndex : 0)")).ToString(), "True");
+            string dropdown = ReadUi("ModelProfileDropdown.cs");
+            AssertEq("模型下拉列表可滚动、继承字号且弹层盖过设置窗",
+                (dropdown.Contains("scroll.vertical = true") && dropdown.Contains("UiFontSizeStore.Bind(text, 16)")
+                    && dropdown.Contains("popup.sortingOrder = owner.sortingOrder + 2")
+                    && dropdown.Contains("text.richText = false")).ToString(), "True");
             AssertEq("结构化世界书只给正文的窗口或条目首次点击全选",
                 (structured.Contains("var longInput = _contentInput as LongTextInputField;")
                     && structured.Contains("ArmContentFirstClickSelectAll();")

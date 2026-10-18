@@ -46,6 +46,9 @@ namespace JianghuYouling.Core.Llm
         private bool _callbackRedactorsFlushed;
 
         public int PromptTokens, CompletionTokens, ReasoningTokens, TotalTokens, CachedTokens, CacheMissTokens, CacheWriteTokens;
+        private LlmUsage _reportedUsage;
+        public int? ReportedInputTokens => _reportedUsage.NormalizedInputTokens;
+        public int? ReportedOutputTokens => _reportedUsage.NormalizedOutputTokens;
         public bool SawDone { get; private set; }
         public bool SawFinishReason { get; private set; }
         public string FinishReason { get; private set; }
@@ -110,13 +113,8 @@ namespace JianghuYouling.Core.Llm
             var usage = o["usage"];
             if (usage != null && usage.Type == JTokenType.Object)
             {
-                var parsedUsage = LlmUsage.Parse(usage, new LlmUsage
-                {
-                    PromptTokens = PromptTokens, CompletionTokens = CompletionTokens,
-                    ReasoningTokens = ReasoningTokens, TotalTokens = TotalTokens,
-                    CacheHitTokens = CachedTokens, CacheMissTokens = CacheMissTokens,
-                    CacheWriteTokens = CacheWriteTokens,
-                });
+                var parsedUsage = LlmUsage.Parse(usage, _reportedUsage);
+                _reportedUsage = parsedUsage;
                 PromptTokens = parsedUsage.PromptTokens; CompletionTokens = parsedUsage.CompletionTokens;
                 ReasoningTokens = parsedUsage.ReasoningTokens; TotalTokens = parsedUsage.TotalTokens;
                 CachedTokens = parsedUsage.CacheHitTokens; CacheMissTokens = parsedUsage.CacheMissTokens;
@@ -686,6 +684,8 @@ namespace JianghuYouling.Core.Llm
                 ReplayReasoningContent = _sawReplayReasoning ? _replayReasoning.ToString() : null,
                 PromptTokens = PromptTokens,
                 CompletionTokens = CompletionTokens,
+                ReportedInputTokens = ReportedInputTokens,
+                ReportedOutputTokens = ReportedOutputTokens,
                 CachedTokens = CachedTokens,
                 CacheMissTokens = CacheMissTokens,
                 CacheWriteTokens = CacheWriteTokens,

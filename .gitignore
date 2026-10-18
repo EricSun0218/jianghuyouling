@@ -25,3 +25,8 @@ Settings.json*
 SavedData/
 SaveData/
 Logs/
+node_modules/
+.vercel/
+/web/telemetry/public/app.js
+/web/telemetry/public/app.js.map
+/web/telemetry/.local/

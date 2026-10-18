@@ -317,6 +317,7 @@ namespace JianghuYouling.Core.Llm
             { __res = new LlmResult { Ok = false, Canceled = true, Error = "已取消" }; }
             __res = Sanitize(__res); __res.QueueMs += __workflowQueueMs;
             PromptTokenCalibrator.Observe(TokenBudgetIdentity, __estimatedPrompt, __res.PromptTokens);
+            Telemetry.AiTelemetry.Record(_model, __res.Ok, __res.ReportedInputTokens, __res.ReportedOutputTokens);
             LlmLog.RecordWithTrace(SecretRedactor.Redact(tag, _apiKey), SecretRedactor.Redact(_model, _apiKey), "纯文本", __sw.ElapsedMilliseconds, __res.PromptTokens, __res.CompletionTokens, __res.Ok, __res.Error,
                 __res.CachedTokens, __res.CacheWriteTokens, __res.QueueMs, __res.TtftMs, __res.RetryCount, __res.RetryClass,
                 __res.ReasoningTokens, __res.TotalTokens, __res.CacheMissTokens, TraceForResult(trace, __res));
@@ -387,6 +388,7 @@ namespace JianghuYouling.Core.Llm
             { __res = new LlmToolResult { Ok = false, Canceled = true, Error = "已取消" }; }
             __res = Sanitize(__res); __res.QueueMs += __workflowQueueMs;
             PromptTokenCalibrator.Observe(TokenBudgetIdentity, __estimatedPrompt, __res.PromptTokens);
+            Telemetry.AiTelemetry.Record(_model, __res.Ok, __res.ReportedInputTokens, __res.ReportedOutputTokens);
             LlmLog.RecordWithTrace(SecretRedactor.Redact(tag, _apiKey), SecretRedactor.Redact(_model, _apiKey), "工具", __sw.ElapsedMilliseconds, __res.PromptTokens, __res.CompletionTokens, __res.Ok, __res.Error,
                 __res.CachedTokens, __res.CacheWriteTokens, __res.QueueMs, __res.TtftMs, __res.RetryCount, __res.RetryClass,
                 __res.ReasoningTokens, __res.TotalTokens, __res.CacheMissTokens, TraceForResult(trace, __res));
@@ -583,6 +585,7 @@ namespace JianghuYouling.Core.Llm
             { __res = new LlmToolResult { Ok = false, Canceled = true, Error = "已取消" }; }
             __res = Sanitize(__res); __res.QueueMs += __workflowQueueMs;
             PromptTokenCalibrator.Observe(TokenBudgetIdentity, __estimatedPrompt, __res.PromptTokens);
+            Telemetry.AiTelemetry.Record(_model, __res.Ok, __res.ReportedInputTokens, __res.ReportedOutputTokens);
             LlmLog.RecordWithTrace(SecretRedactor.Redact(tag, _apiKey), SecretRedactor.Redact(_model, _apiKey), "流式", __sw.ElapsedMilliseconds, __res.PromptTokens, __res.CompletionTokens, __res.Ok, __res.Error,
                 __res.CachedTokens, __res.CacheWriteTokens, __res.QueueMs, __res.TtftMs, __res.RetryCount, __res.RetryClass,
                 __res.ReasoningTokens, __res.TotalTokens, __res.CacheMissTokens, TraceForResult(trace, __res));
@@ -671,6 +674,8 @@ namespace JianghuYouling.Core.Llm
                 // failure.  Preserve any usage frame received so logs do not misleadingly say 0/0.
                 PromptTokens = collector.PromptTokens,
                 CompletionTokens = collector.CompletionTokens,
+                ReportedInputTokens = collector.ReportedInputTokens,
+                ReportedOutputTokens = collector.ReportedOutputTokens,
                 CachedTokens = collector.CachedTokens,
                 CacheMissTokens = collector.CacheMissTokens,
                 CacheWriteTokens = collector.CacheWriteTokens,
@@ -678,6 +683,8 @@ namespace JianghuYouling.Core.Llm
                 TotalTokens = collector.TotalTokens,
             };
             var result = collector.ToResult();
+            result.ReportedInputTokens = collector.ReportedInputTokens;
+            result.ReportedOutputTokens = collector.ReportedOutputTokens;
             result.QueueMs = queueMs; result.TtftMs = r.TtftMs;
             result.RetryCount = retryCount; result.RetryClass = retryClass;
             if (UsesGeminiSignatureCompatibilityFallback(result))
@@ -1948,6 +1955,8 @@ namespace JianghuYouling.Core.Llm
                     RawContent = raw,
                     PromptTokens = usage.PromptTokens,
                     CompletionTokens = usage.CompletionTokens,
+                    ReportedInputTokens = usage.NormalizedInputTokens,
+                    ReportedOutputTokens = usage.NormalizedOutputTokens,
                     ReasoningTokens = usage.ReasoningTokens,
                     TotalTokens = usage.TotalTokens,
                     CachedTokens = usage.CacheHitTokens,
@@ -2165,6 +2174,8 @@ namespace JianghuYouling.Core.Llm
                     ReplayReasoningContent = replayReasoning,
                     PromptTokens = usage.PromptTokens,
                     CompletionTokens = usage.CompletionTokens,
+                    ReportedInputTokens = usage.NormalizedInputTokens,
+                    ReportedOutputTokens = usage.NormalizedOutputTokens,
                     ReasoningTokens = usage.ReasoningTokens,
                     TotalTokens = usage.TotalTokens,
                     CachedTokens = usage.CacheHitTokens,

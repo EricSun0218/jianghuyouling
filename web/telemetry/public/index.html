@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="theme-color" content="#192c44">
+  <title>AI 使用统计 · 江湖有灵</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header class="masthead">
+    <a class="brand" href="/" aria-label="江湖有灵 AI 使用统计"><span class="brand-mark" aria-hidden="true">灵</span><span>江湖有灵<small>AI 使用统计</small></span></a>
+    <div class="header-actions"><span class="private-label">私人看板</span><button id="logout" class="quiet" hidden>退出登录</button></div>
+  </header>
+  <main>
+    <section id="login" class="login-layout" aria-labelledby="login-title">
+      <form id="login-form" class="login-form">
+        <h1 id="login-title">统计看板</h1><p>输入访问密码查看数据。</p>
+        <label for="password">访问密码</label><input id="password" type="password" name="password" autocomplete="current-password" maxlength="128" required placeholder="输入密码" disabled>
+        <button id="login-submit" type="submit" disabled>登录</button>
+        <p id="login-message" class="form-message" role="status" aria-live="polite">正在连接登录服务…</p>
+        <p class="fine-print">会话仅保留在当前浏览器标签页。</p>
+      </form>
+    </section>
+    <section id="dashboard" hidden aria-labelledby="dashboard-title">
+      <div class="page-heading"><div><p class="section-label">使用概览</p><h1 id="dashboard-title">江湖中的 AI 足迹</h1><p id="range-description">按北京时间统计，展示已收到的数据。</p></div><button id="refresh" class="secondary">刷新数据</button></div>
+      <form id="range-form" class="range-toolbar"><div class="presets" aria-label="快捷日期范围"><button type="button" data-days="7" class="quiet">近 7 天</button><button type="button" data-days="30" class="quiet selected" aria-pressed="true">近 30 天</button><button type="button" data-days="90" class="quiet">近 90 天</button></div><div class="date-fields"><label>从 <input id="start" type="date" required></label><span aria-hidden="true">至</span><label><span class="sr-only">结束日期</span><input id="end" type="date" required></label><button type="submit" class="secondary">查看</button></div></form>
+      <p id="dashboard-status" class="status-line" role="status" aria-live="polite"></p>
+      <div id="report" hidden>
+        <div class="activity-strip" aria-label="截至结束日的 AI 活跃客户端">
+          <div class="metric primary-metric"><span>AI 日活 <abbr title="当天至少成功调用一次 AI 的客户端">DAU</abbr></span><strong id="dau">—</strong><small>结束日</small></div>
+          <div class="metric"><span>AI 周活 <abbr title="截至结束日，连续 7 天内去重的活跃客户端">WAU</abbr></span><strong id="wau">—</strong><small>连续 7 天去重</small></div>
+          <div class="metric"><span>AI 月活 <abbr title="截至结束日，连续 30 天内去重的活跃客户端">MAU</abbr></span><strong id="mau">—</strong><small>连续 30 天去重</small></div>
+          <div class="metric"><span>新增客户端</span><strong id="new-clients">—</strong><small>所选期间首次成功使用</small></div>
+          <div class="metric"><span>累计客户端</span><strong id="cumulative-clients">—</strong><small>截至结束日</small></div>
+        </div>
+        <section class="trend-panel" aria-labelledby="trend-title"><div class="section-heading"><div><h2 id="trend-title">每天的使用变化</h2><p>日活与新增，让增长有迹可循。</p></div><label class="chart-select">指标 <select id="chart-metric"><option value="clients">活跃与新增</option><option value="tokens">输入与输出 Token</option><option value="calls">成功与全部调用</option></select></label></div><div class="chart-wrap"><canvas id="trend-chart" role="img" aria-label="所选期间每日统计趋势"></canvas></div><p id="empty-note" class="empty-note" hidden>这个时间范围尚未收到 AI 调用统计。启用新版 Mod 并使用 AI 后，数据会逐次更新。</p><details class="data-details"><summary>查看每日明细</summary><div class="table-scroll"><table><thead><tr><th>日期</th><th>日活</th><th>新增</th><th>成功调用</th><th>输入 Token</th><th>输出 Token</th></tr></thead><tbody id="daily-table"></tbody></table></div></details></section>
+        <div class="usage-grid">
+          <section class="token-panel" aria-labelledby="token-title"><div class="section-heading"><div><h2 id="token-title">Token 用量</h2><p>已返回的输入与输出用量，不等同于账单。</p></div></div><div class="token-pair"><div><span>所选期间输入</span><strong id="input-tokens">—</strong></div><div><span>所选期间输出</span><strong id="output-tokens">—</strong></div></div><table class="token-table"><thead><tr><th>统计范围</th><th>输入</th><th>输出</th></tr></thead><tbody id="token-table"></tbody></table><p id="coverage" class="fine-print"></p></section>
+          <section class="intensity-panel" aria-labelledby="intensity-title"><h2 id="intensity-title">使用强度</h2><p class="subtle">所选期间，每个活跃客户端的使用规模。</p><div class="intensity-total"><span>成功 AI 调用</span><strong id="success-calls">—</strong></div><dl class="intensity-details"><div><dt>已上报调用总数</dt><dd id="all-calls">—</dd></div><div><dt>期间去重活跃客户端</dt><dd id="active-clients">—</dd></div><div><dt>平均成功调用 / 活跃客户端</dt><dd id="calls-per-client">—</dd></div><div><dt>平均 Token / 活跃客户端</dt><dd id="tokens-per-client">—</dd></div></dl></section>
+        </div>
+        <section class="model-panel" aria-labelledby="models-title"><div class="section-heading"><div><h2 id="models-title">模型使用分布</h2><p>按已上报调用量排序；自定义名称归入“其他”。</p></div><span id="model-count" class="subtle"></span></div><div class="table-scroll"><table class="model-table"><thead><tr><th>模型</th><th>调用数 / 占比</th><th>成功调用</th><th>输入 Token</th><th>输出 Token</th><th>Token 占比</th></tr></thead><tbody id="model-table"></tbody></table></div></section>
+        <section class="retention-panel" aria-labelledby="retention-title"><div class="retention-summary"><h2 id="retention-title">7 日留存</h2><strong id="d7-rate">—</strong><p id="retention-note">首次成功使用后，第 7 天再次成功使用的比例。</p></div><div class="retention-list"><div class="section-heading"><p>按首次成功使用日分组</p><span class="subtle">第 7 天结束后才结算</span></div><div class="table-scroll retention-scroll"><table><thead><tr><th>首次使用日</th><th>新增客户端</th><th>第 7 天回访</th><th>留存率</th></tr></thead><tbody id="retention-table"></tbody></table></div></div></section>
+        <aside class="methodology"><h2>统计口径</h2><p>“用户”按本地随机 ID 去重，是上报客户端数，不代表实名认证人数。AI 活跃要求至少一次成功调用。每次调用异步上报，失败不缓存、不补报，因此数字可能低于实际使用量。模型分类来自固定白名单，不上传自定义模型名。</p><p>Token 仅累计接口实际返回的用量；缺失不当成已知的 0，缓存输入和推理输出不重复相加。统计不接收对话、提示词、存档信息、Steam ID、API Key 或接口地址。</p></aside>
+      </div>
+    </section>
+  </main>
+  <footer><span>江湖有灵 · <a href="/third-party-licenses.txt">开源许可</a></span><span>北京时间 · 密码保护</span></footer>
+</body>
+</html>

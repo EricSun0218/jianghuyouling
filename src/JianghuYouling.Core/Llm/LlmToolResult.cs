@@ -18,6 +18,8 @@ namespace JianghuYouling.Core.Llm
         public int CacheWriteTokens { get; set; }
         public int ReasoningTokens { get; set; }
         public int TotalTokens { get; set; }
+        public int? ReportedInputTokens { get; set; }
+        public int? ReportedOutputTokens { get; set; }
         public long QueueMs { get; set; }
         public long TtftMs { get; set; }
         public int RetryCount { get; set; }

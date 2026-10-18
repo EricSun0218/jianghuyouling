@@ -36,6 +36,12 @@ Newtonsoft.Json 的 MIT 许可全文如下：
 来源：https://github.com/microsoft/dotnet
 许可：https://github.com/microsoft/dotnet/blob/main/LICENSE
 
+## AI 使用统计网页
+
+`web/telemetry` 使用 Supabase JavaScript SDK、Chart.js 及其传递依赖，构建使用 esbuild。
+精确版本由该目录的 `package-lock.json` 锁定。全部依赖的许可文本见
+[网页第三方许可](web/telemetry/public/third-party-licenses.txt)，部署后也通过页脚公开提供。
+
 ## 游戏安装提供的依赖
 
 Frontend / Backend 引用本机《太吾绘卷》安装中的游戏、Unity、Harmony、

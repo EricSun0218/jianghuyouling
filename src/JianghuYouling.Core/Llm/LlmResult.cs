@@ -14,6 +14,8 @@ namespace JianghuYouling.Core.Llm
         public int CacheWriteTokens { get; set; }
         public int ReasoningTokens { get; set; }
         public int TotalTokens { get; set; }
+        public int? ReportedInputTokens { get; set; }
+        public int? ReportedOutputTokens { get; set; }
         public long QueueMs { get; set; }          // 后台/全局并发闸排队耗时
         public long TtftMs { get; set; }           // 首响应头/首个流式数据到达；未观测为 0
         public int RetryCount { get; set; }        // 网络或能力兼容重发次数

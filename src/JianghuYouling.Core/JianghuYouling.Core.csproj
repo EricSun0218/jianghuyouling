@@ -19,6 +19,8 @@
   </ItemGroup>
 
   <ItemGroup>
+    <EmbeddedResource Include="..\..\web\telemetry\shared\models.json"
+                      LogicalName="JianghuYouling.Core.Telemetry.Models.json" />
     <!-- 行动指南与灵儿知识技能以独立资源包存在，但嵌入 Core DLL，部署时不增加易丢失的散文件。 -->
     <EmbeddedResource Include="ActionSkills\**\*.md" />
     <EmbeddedResource Include="AssistantSkills\**\*.md" />

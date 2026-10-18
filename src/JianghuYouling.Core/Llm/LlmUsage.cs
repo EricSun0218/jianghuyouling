@@ -11,11 +11,27 @@ namespace JianghuYouling.Core.Llm
         public int CacheHitTokens;
         public int CacheMissTokens;
         public int CacheWriteTokens;
+        public bool InputReported, OutputReported, InputExcludesCache, OutputExcludesReasoning;
+        public int? NormalizedInputTokens => InputReported
+            ? (int?)(InputExcludesCache ? SafeAdd(SafeAdd(PromptTokens, CacheHitTokens), CacheWriteTokens) : PromptTokens) : null;
+        public int? NormalizedOutputTokens => OutputReported
+            ? (int?)(OutputExcludesReasoning ? SafeAdd(CompletionTokens, ReasoningTokens) : CompletionTokens) : null;
 
         public static LlmUsage Parse(JToken usage, LlmUsage fallback = default)
         {
             if (usage == null || usage.Type != JTokenType.Object) return fallback;
             var u = fallback;
+            JToken input = usage["prompt_tokens"] ?? usage["input_tokens"]
+                ?? usage["prompt_token_count"] ?? usage["input_token_count"];
+            JToken output = usage["completion_tokens"] ?? usage["output_tokens"]
+                ?? usage["candidates_token_count"] ?? usage["output_token_count"];
+            u.InputReported |= ValidCount(input);
+            u.OutputReported |= ValidCount(output);
+            if (ValidCount(input)) u.InputExcludesCache = usage["prompt_tokens"] == null
+                && usage["input_tokens"] != null
+                && (usage["cache_read_input_tokens"] != null || usage["cache_creation_input_tokens"] != null);
+            if (ValidCount(output)) u.OutputExcludesReasoning = usage["completion_tokens"] == null
+                && usage["output_tokens"] == null && usage["candidates_token_count"] != null;
             u.PromptTokens = NonNegativeInt(usage["prompt_tokens"] ?? usage["input_tokens"]
                 ?? usage["prompt_token_count"] ?? usage["input_token_count"], u.PromptTokens);
             u.CompletionTokens = NonNegativeInt(usage["completion_tokens"] ?? usage["output_tokens"]
@@ -64,6 +80,13 @@ namespace JianghuYouling.Core.Llm
             catch { return fallback; }
             if (value < 0) return fallback;
             return value > int.MaxValue ? int.MaxValue : (int)value;
+        }
+
+        private static bool ValidCount(JToken token)
+        {
+            if (token == null || (token.Type != JTokenType.Integer && token.Type != JTokenType.String)) return false;
+            return long.TryParse(token.ToString(), System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out long value) && value >= 0;
         }
 
         private static int SafeAdd(int a, int b)
