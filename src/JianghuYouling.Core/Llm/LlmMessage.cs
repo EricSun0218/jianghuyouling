@@ -34,6 +34,8 @@ namespace JianghuYouling.Core.Llm
         public bool IsProactive { get; set; }                // 本地助手历史元数据：无人提问时的主动消息；上游请求序列化会忽略
         [Newtonsoft.Json.JsonIgnore]
         public bool IsUntrustedContextData { get; set; }     // 本地预算/信任元数据；上游请求不序列化
+        [Newtonsoft.Json.JsonIgnore]
+        public bool IsStoredAssistantReply { get; set; }    // 已提交的可见历史，不是当前工具链的模型响应
 
         public LlmMessage() { }
         public LlmMessage(string role, string content) { Role = role; Content = content; }
@@ -42,6 +44,9 @@ namespace JianghuYouling.Core.Llm
         public static LlmMessage User(string c) => new LlmMessage("user", c);
         public static LlmMessage Assistant(string c, string reasoningContent = null) =>
             new LlmMessage("assistant", c) { ReasoningContent = reasoningContent };
+
+        public static LlmMessage StoredAssistant(string c) =>
+            new LlmMessage("assistant", c) { IsStoredAssistantReply = true };
 
         /// <summary>工具执行结果回传给模型(role=tool)。</summary>
         public static LlmMessage Tool(string toolCallId, string content) =>

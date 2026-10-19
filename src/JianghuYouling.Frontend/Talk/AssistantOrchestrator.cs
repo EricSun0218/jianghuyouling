@@ -387,7 +387,7 @@ namespace JianghuYouling
             if (target == null || regularParts == null) return;
             if (!string.IsNullOrWhiteSpace(newestProactive)) regularParts.Add(newestProactive);
             if (regularParts.Count > 0)
-                target.Add(LlmMessage.Assistant(string.Join("\n\n", regularParts.ToArray())));
+                target.Add(LlmMessage.StoredAssistant(string.Join("\n\n", regularParts.ToArray())));
             regularParts.Clear();
         }
 

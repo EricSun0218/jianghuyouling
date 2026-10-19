@@ -284,7 +284,7 @@ namespace JianghuYouling.Core.Prompt
                     }
                     if (t.FromPlayer) { msgs.Add(new LlmMessage("user", text)); continue; }
                     string c = text + RenderExecutionHistorySuffix(t.Actions, t.ToolResults);
-                    msgs.Add(new LlmMessage("assistant", c));
+                    msgs.Add(LlmMessage.StoredAssistant(c));
                 }
 
             // 玩家保存的思考表达属于可信设置，不是本轮玩家台词。放在世界书、画像和旧历史

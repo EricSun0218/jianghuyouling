@@ -1711,6 +1711,10 @@ namespace JianghuYouling.Core.Llm
             bool replayAllAssistantTurns = _capabilities.IsDeepSeekV4
                 && tools != null && tools.Count > 0
                 && !string.Equals(toolChoice, "none", StringComparison.OrdinalIgnoreCase);
+            // 已提交聊天只保存可见正文。不能因这些历史缺少隐藏思考而关闭新一轮思考，
+            // 也不能编造空思考。仅将显式标记的存档回复投影为带发言人标识的历史资料；
+            // 活动工具链（含无工具回复）仍必须保留真实回灌字段，其他 provider 不变。
+            if (replayAllAssistantTurns) messages = StoredConversationReplay.Prepare(messages);
             // 若历史回复根本没产出或未保留该字段，本轮只能保持
             // 思考关闭，不能伪造思考内容或把整个后续请求送成 400。
             if (reasoningReplayThinking

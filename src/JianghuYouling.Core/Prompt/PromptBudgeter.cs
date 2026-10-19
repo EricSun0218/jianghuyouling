@@ -274,11 +274,24 @@ namespace JianghuYouling.Core.Prompt
         public static int Estimate(IList<LlmMessage> messages, IList<ToolDef> tools)
         {
             int total = EstimateTools(tools);
+            bool storedReplayBoundaryCounted = false;
             if (messages != null)
                 foreach (var m in messages)
                 {
                     if (m == null) continue;
                     total += 5 + EstimateText(m.Content) + EstimateText(m.ReasoningContent);
+                    // 预算在 provider 序列化之前计算；预留历史资料投影的额外体积。
+                    // 非 DeepSeek 请求不需要该投影，多留少量余量比低估实际输入安全。
+                    if (tools != null && tools.Count > 0 && StoredConversationReplay.NeedsContextReplay(m))
+                    {
+                        total += System.Math.Max(0,
+                            EstimateText(StoredConversationReplay.ContextContent(m)) - EstimateText(m.Content));
+                        if (!storedReplayBoundaryCounted)
+                        {
+                            total += 5 + EstimateText(StoredConversationReplay.BoundaryRule);
+                            storedReplayBoundaryCounted = true;
+                        }
+                    }
                     if (m.ToolCalls != null)
                         foreach (var call in m.ToolCalls)
                             total += 12 + EstimateText(call?.Name) + EstimateText(call?.ArgumentsJson);

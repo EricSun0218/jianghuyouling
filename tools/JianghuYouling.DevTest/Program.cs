@@ -5378,7 +5378,7 @@ namespace JianghuYouling.DevTest
                     .ToString(), "True");
         }
 
-        private static async Task<string> ReadHttpRequestBody(NetworkStream stream)
+        internal static async Task<string> ReadHttpRequestBody(NetworkStream stream)
         {
             var bytes = new List<byte>();
             var buffer = new byte[4096];
