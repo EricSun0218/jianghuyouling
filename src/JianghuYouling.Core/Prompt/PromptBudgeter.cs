@@ -153,6 +153,11 @@ namespace JianghuYouling.Core.Prompt
         {
             if (messages == null) return -1;
             for (int i = messages.Count - 1; i >= 0; i--)
+                if (messages[i] != null && messages[i].Role == "user"
+                    && !messages[i].IsUntrustedContextData) return i;
+            // Autonomous monthly agents can start with context data rather than a human
+            // turn. Protect that original chain, not a later compacted receipt summary.
+            for (int i = 0; i < messages.Count; i++)
                 if (messages[i] != null && messages[i].Role == "user") return i;
             return -1;
         }
@@ -232,7 +237,8 @@ namespace JianghuYouling.Core.Prompt
                 || string.IsNullOrEmpty(message.Content)) return false;
             return IsUntrustedPortraitMessage(message)
                 || message.Content.StartsWith("<JHYL_UNTRUSTED_MEMORY_DATA>", StringComparison.Ordinal)
-                || message.Content.StartsWith("<JHYL_UNTRUSTED_SUMMARY_DATA>", StringComparison.Ordinal);
+                || message.Content.StartsWith("<JHYL_UNTRUSTED_SUMMARY_DATA>", StringComparison.Ordinal)
+                || message.Content.StartsWith("{\"kind\":\"untrusted_historical_tool_data\"", StringComparison.Ordinal);
         }
 
         private static bool IsUntrustedPortraitMessage(LlmMessage message)

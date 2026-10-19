@@ -37,6 +37,11 @@ namespace JianghuYouling.DevTest
             Console.OutputEncoding = System.Text.Encoding.UTF8;
             try
             {
+            if (args != null && Array.Exists(args, a => string.Equals(a, "--reasoning-replay-only", StringComparison.OrdinalIgnoreCase)))
+            {
+                ReasoningReplayTests.RunOffline();
+                return 0;
+            }
             if (args != null && Array.Exists(args, a => string.Equals(a, "--commission-only", StringComparison.OrdinalIgnoreCase)))
             {
                 CommissionPolicyTests.Run();
@@ -66,6 +71,10 @@ namespace JianghuYouling.DevTest
                     OptionValue(args, "--image-protected-config"),
                     OptionValue(args, "--image-reference"));
             string protectedConfigPath = OptionValue(args, "--deepseek-protected-config");
+            bool reasoningReplayLive = args != null && Array.Exists(args,
+                a => string.Equals(a, "--reasoning-replay-live", StringComparison.OrdinalIgnoreCase));
+            if (reasoningReplayLive && string.IsNullOrWhiteSpace(protectedConfigPath))
+                throw new ArgumentException("Reasoning replay live tests require a protected config.");
             bool charmContextLive = args != null && Array.Exists(args,
                 a => string.Equals(a, "--charm-context-live", StringComparison.OrdinalIgnoreCase));
             if (args != null && Array.Exists(args,
@@ -131,7 +140,7 @@ namespace JianghuYouling.DevTest
                     deepSeekNpcProactiveE2e, deepSeekEncyclopediaE2e,
                     deepSeekAdoptiveRelationE2e, deepSeekNpcNovelE2e,
                     deepSeekNativeInteractionE2e, deepSeekToolRecoveryLive,
-                    deepSeekGroupCompressionLive, charmContextLive);
+                    deepSeekGroupCompressionLive, charmContextLive, reasoningReplayLive);
             if (args != null && Array.Exists(args, a => string.Equals(a, "--deepseek-env", StringComparison.OrdinalIgnoreCase)))
                 return await TestDeepSeekFromEnvironment();
 
@@ -361,6 +370,7 @@ namespace JianghuYouling.DevTest
             TestAssistantSkillCatalog();
             ToolSurfaceContractTests.Run();
             CommissionPolicyTests.Run();
+            ReasoningReplayTests.RunOffline();
             GhostwriteImitationProfileTests.Run();
             TestBarterToolRegistry();
             TestNewToolRegistryAndPersonaRules();
@@ -717,7 +727,8 @@ namespace JianghuYouling.DevTest
             bool npcProactiveE2e = false, bool encyclopediaE2e = false,
             bool adoptiveRelationE2e = false, bool npcNovelE2e = false,
             bool nativeInteractionE2e = false, bool toolRecoveryLive = false,
-            bool groupCompressionLive = false, bool charmContextLive = false)
+            bool groupCompressionLive = false, bool charmContextLive = false,
+            bool reasoningReplayLive = false)
         {
             if (!ProtectedConfigFile.TryLoad(path, out var config, out var key, out _)
                 || config == null || string.IsNullOrWhiteSpace(key))
@@ -735,10 +746,11 @@ namespace JianghuYouling.DevTest
             if (!string.IsNullOrWhiteSpace(modelOverride))
             {
                 string requested = modelOverride.Trim();
-                if (!string.Equals(requested, "deepseek-v4-flash", StringComparison.OrdinalIgnoreCase)
+                if (!string.Equals(requested, "deepseek-flash", StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(requested, "deepseek-v4-flash", StringComparison.OrdinalIgnoreCase)
                     && !string.Equals(requested, "deepseek-v4-pro", StringComparison.OrdinalIgnoreCase))
                 {
-                    Console.Error.WriteLine("[FAIL] --deepseek-model 只允许 deepseek-v4-flash/deepseek-v4-pro");
+                    Console.Error.WriteLine("[FAIL] --deepseek-model 只允许 deepseek-flash/deepseek-v4-flash/deepseek-v4-pro");
                     return 2;
                 }
                 model = requested;
@@ -757,6 +769,8 @@ namespace JianghuYouling.DevTest
             }
             if (toolBenchmark)
                 return await TestDeepSeekToolBenchmark(client);
+            if (reasoningReplayLive)
+                return await ReasoningReplayTests.RunLive(client);
             if (charmContextLive)
                 return await CharmContextTests.RunLive(client);
             if (sceneKillE2e)
@@ -2140,7 +2154,7 @@ namespace JianghuYouling.DevTest
                         stopSignalAccepted = true;
                         break;
                     }
-                    messages.Add(LlmMessage.Assistant(turn.Content ?? string.Empty));
+                    messages.Add(LlmMessage.Assistant(turn.Content ?? string.Empty, turn.ReplayReasoningContent));
                     messages.Add(LlmMessage.System(
                         "尚未达到至少三项、两类成功行为，继续使用真实动作工具；不要生成正文。"));
                     continue;
@@ -2226,7 +2240,7 @@ namespace JianghuYouling.DevTest
             // Exercise the exact production compaction shape against the real provider.
             // Only old groups receive synthetic padding and are removed before the request;
             // the newest two provider-generated reasoning/tool protocol groups remain
-            // byte-for-byte unchanged and prove that assistant summaries can precede them.
+            // byte-for-byte unchanged and prove that untrusted data summaries can precede them.
             List<LlmMessage> toolGroups = messages.Where(message =>
                 message != null && message.Role == "assistant"
                 && message.ToolCalls != null && message.ToolCalls.Count > 0).ToList();
@@ -2252,7 +2266,7 @@ namespace JianghuYouling.DevTest
             LlmToolResult prunedReplay = null;
             for (int attempt = 0; attempt < 2; attempt++)
             {
-                prunedReplay = await client.SendToolRoundAsync(messages, tools, "none",
+                prunedReplay = await client.SendToolRoundAsync(messages, tools, "auto",
                     256, 0.0, default, 90,
                     "DeepSeek月度旧工具轮压缩协议真实模拟", false,
                     LlmReasoningPolicy.Auto);
@@ -6927,7 +6941,7 @@ namespace JianghuYouling.DevTest
                     && messages.Count(x => x.Role == "assistant"
                         && x.ToolCalls != null && x.ToolCalls.Count > 0)
                         == messages.Count(x => x.Role == "tool")
-                    && messages.Count(x => x.Role == "assistant"
+                    && messages.Count(x => x.Role == "user"
                         && x.IsUntrustedContextData
                         && (x.Content ?? "").StartsWith(
                             "{\"kind\":\"untrusted_historical_tool_data\"",
@@ -6966,7 +6980,7 @@ namespace JianghuYouling.DevTest
                 if (string.Equals(role, "system", StringComparison.Ordinal)
                     && content.Contains("kind=untrusted_historical_tool_data"))
                     boundaryWireIndex = index;
-                if (string.Equals(role, "assistant", StringComparison.Ordinal)
+                if (string.Equals(role, "user", StringComparison.Ordinal)
                     && content.StartsWith(
                         "{\"kind\":\"untrusted_historical_tool_data\"",
                         StringComparison.Ordinal))
@@ -7057,9 +7071,9 @@ namespace JianghuYouling.DevTest
             AssertEq("同一assistant多工具完整协议轮可原子压缩",
                 (parallelCompleteReport.CompactedResults == 1
                     && parallelComplete.Count(message => message.Role == "tool") == 2
-                    && parallelComplete.Count(message => message.Role == "assistant"
+                    && parallelComplete.Count(message => message.Role == "user"
                         && message.IsUntrustedContextData) == 1
-                    && parallelComplete.Any(message => message.Role == "assistant"
+                    && parallelComplete.Any(message => message.Role == "user"
                         && message.IsUntrustedContextData
                         && (message.Content ?? "").Contains("〔已隔离控制标记〕"))
                     && !parallelComplete.Any(message => message.Role == "assistant"

@@ -29,7 +29,7 @@ namespace JianghuYouling.Core.Llm
         public string Content { get; set; }
         public string ToolCallId { get; set; }              // role=tool:对应的 tool_call id
         public List<LlmToolCall> ToolCalls { get; set; }    // role=assistant:模型发起的工具调用
-        public string ReasoningContent { get; set; }         // DeepSeek 等要求工具轮下一步原样回灌 reasoning_content
+        public string ReasoningContent { get; set; }         // 活动工具链中原样回灌，包括未调用工具的模型回复
         public bool CacheBoundary { get; set; }              // 本地稳定前缀标记；OpenAI 兼容请求不得直接翻译成 native cache_control
         public bool IsProactive { get; set; }                // 本地助手历史元数据：无人提问时的主动消息；上游请求序列化会忽略
         [Newtonsoft.Json.JsonIgnore]
@@ -40,7 +40,8 @@ namespace JianghuYouling.Core.Llm
 
         public static LlmMessage System(string c) => new LlmMessage("system", c);
         public static LlmMessage User(string c) => new LlmMessage("user", c);
-        public static LlmMessage Assistant(string c) => new LlmMessage("assistant", c);
+        public static LlmMessage Assistant(string c, string reasoningContent = null) =>
+            new LlmMessage("assistant", c) { ReasoningContent = reasoningContent };
 
         /// <summary>工具执行结果回传给模型(role=tool)。</summary>
         public static LlmMessage Tool(string toolCallId, string content) =>

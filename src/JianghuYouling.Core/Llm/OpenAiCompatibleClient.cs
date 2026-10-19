@@ -1674,14 +1674,16 @@ namespace JianghuYouling.Core.Llm
             return false;
         }
 
-        // 工具循环历史里是否存在“无可回灌思考”的助手工具消息。空串是合法回灌值(provider 确实
+        // 工具循环历史里是否存在“无可回灌思考”的助手消息。空串是合法回灌值(provider 确实
         // 发过 reasoning_content 字段)；只有 null(那一轮响应根本没有该字段)才代表思考模式
         // 协议无法满足。
-        private static bool HasToolCallMessageWithoutReasoningReplay(IList<LlmMessage> messages)
+        private static bool HasAssistantMessageWithoutReasoningReplay(IList<LlmMessage> messages,
+            bool includePlainMessages)
         {
             if (messages == null) return false;
             foreach (var m in messages)
-                if (m != null && m.Role == "assistant" && m.ToolCalls != null && m.ToolCalls.Count > 0
+                if (m != null && m.Role == "assistant"
+                    && (includePlainMessages || m.ToolCalls != null && m.ToolCalls.Count > 0)
                     && m.ReasoningContent == null)
                     return true;
             return false;
@@ -1704,10 +1706,15 @@ namespace JianghuYouling.Core.Llm
             bool deepSeekThinking = DeepSeekThinkingEnabled(effectivePolicy);
             bool reasoningReplayThinking = ReasoningReplayThinkingEnabled(effectivePolicy);
             // JHYL_REASONING_REPLAY_CONSISTENCY:
-            // DeepSeek V4 与 MiMo V2.5 的思考工具循环都要求请求中每条 assistant.tool_calls
-            // 原样带回当轮 reasoning_content。若历史工具轮根本没产出该字段，本轮只能保持
+            // DeepSeek 带 tools 的请求还要求无工具调用的 assistant 回复保留原始思考。
+            // MiMo 维持其工具轮规则，不把 DeepSeek 的额外约束扩散到其他 provider。
+            bool replayAllAssistantTurns = _capabilities.IsDeepSeekV4
+                && tools != null && tools.Count > 0
+                && !string.Equals(toolChoice, "none", StringComparison.OrdinalIgnoreCase);
+            // 若历史回复根本没产出或未保留该字段，本轮只能保持
             // 思考关闭，不能伪造思考内容或把整个后续请求送成 400。
-            if (reasoningReplayThinking && HasToolCallMessageWithoutReasoningReplay(messages))
+            if (reasoningReplayThinking
+                && HasAssistantMessageWithoutReasoningReplay(messages, replayAllAssistantTurns))
             {
                 effectivePolicy = LlmReasoningPolicy.Off;
                 deepSeekThinking = false;
@@ -1792,10 +1799,11 @@ namespace JianghuYouling.Core.Llm
                 o["content"] = m.Content ?? "";
                 return o;
             }
+            if (m.Role == "assistant" && m.ReasoningContent != null)
+                o["reasoning_content"] = m.ReasoningContent;
             if (m.ToolCalls != null && m.ToolCalls.Count > 0)
             {
                 o["content"] = m.Content ?? "";
-                if (m.ReasoningContent != null) o["reasoning_content"] = m.ReasoningContent;
                 var assistantExtra = m.ToolCalls[0]?.AssistantExtraFields;
                 if (assistantExtra?["reasoning_details"] != null)
                     o["reasoning_details"] = assistantExtra["reasoning_details"].DeepClone();

@@ -1386,7 +1386,7 @@ namespace JianghuYouling
                             finalNarrative = DeterministicStory(result, null);
                             break;
                         }
-                        messages.Add(LlmMessage.Assistant(turn.Content ?? ""));
+                        messages.Add(LlmMessage.Assistant(turn.Content ?? "", turn.ReplayReasoningContent));
                         messages.Add(LlmMessage.System(
                             "你尚未调用任何真实工具。本月与太吾实际相处过，必须先行动；只有硬前置全部阻断时才调用 no_action。"
                             + (preMinimumProgressFuse.ConsecutiveNonProgressRounds >= 2
@@ -1408,7 +1408,7 @@ namespace JianghuYouling
                             finalNarrative = DeterministicStory(result, null);
                             break;
                         }
-                        messages.Add(LlmMessage.Assistant(turn.Content ?? ""));
+                        messages.Add(LlmMessage.Assistant(turn.Content ?? "", turn.ReplayReasoningContent));
                         messages.Add(LlmMessage.System(BuildCompanionDiversityCorrection(
                             confirmedActionCount, confirmedActionCategories)
                             + (preMinimumProgressFuse.ConsecutiveNonProgressRounds >= 2
@@ -1418,7 +1418,7 @@ namespace JianghuYouling
                     }
                     if (completionDecision == MonthlyNoToolDecision.RequestCausalReview)
                     {
-                        messages.Add(LlmMessage.Assistant(turn.Content ?? ""));
+                        messages.Add(LlmMessage.Assistant(turn.Content ?? "", turn.ReplayReasoningContent));
                         messages.Add(LlmMessage.System(
                             "三项、两类只是最低线，不是完成条件。现在重新对照最初动因、未决承诺、冲突与追寻："
                             + "只有存在一项具体未决因果时，才继续调用紧密相关的查询或行动；没有动作次数上限。"

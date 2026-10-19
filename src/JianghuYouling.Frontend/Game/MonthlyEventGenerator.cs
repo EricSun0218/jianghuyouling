@@ -1666,7 +1666,7 @@ namespace JianghuYouling
                                 + " reason=three_rounds_without_action_or_new_facts");
                             break;
                         }
-                        messages.Add(LlmMessage.Assistant(turn.Content ?? ""));
+                        messages.Add(LlmMessage.Assistant(turn.Content ?? "", turn.ReplayReasoningContent));
                         messages.Add(LlmMessage.System(
                             "本回真实行动门槛尚未满足：" + MonthlyEventActionProgress(
                                 meaningfulActionCount, actionCategories)
@@ -1683,7 +1683,7 @@ namespace JianghuYouling
                     if (!consequenceNudgeSent && onlyRelationshipSetup)
                     {
                         consequenceNudgeSent = true;
-                        messages.Add(LlmMessage.Assistant(turn.Content ?? ""));
+                        messages.Add(LlmMessage.Assistant(turn.Content ?? "", turn.ReplayReasoningContent));
                         messages.Add(LlmMessage.System(
                             "目前成功回执只有关系或好感铺垫，尚未产生足以撑起本回的处境后果。请再选择一次由前述关系直接引发的可执行行动（移动、偷窃、交换、赠物、传授、疗伤或危险行动）；若确无合乎人物与前情的行动，下一轮可直接确认收束，不得硬凑。"));
                         continue;
@@ -1692,7 +1692,7 @@ namespace JianghuYouling
                         completionState.OnNoToolDraft(false);
                     if (completionDecision == MonthlyNoToolDecision.RequestCausalReview)
                     {
-                        messages.Add(LlmMessage.Assistant(turn.Content ?? ""));
+                        messages.Add(LlmMessage.Assistant(turn.Content ?? "", turn.ReplayReasoningContent));
                         messages.Add(LlmMessage.System(
                             "三项、两类只是最低线，不是完成条件。现在重新对照本回最初欲望、未决线索、承诺与冲突："
                             + "只要仍有一项尚未真正落定，就继续调用紧密相关的查询或行动；没有动作次数上限。"

@@ -94,14 +94,15 @@ namespace JianghuYouling.Core.Llm
             c.IsLocalOllamaQwen38 = c.IsLocalOllama && LooksLikeQwen38Model(m);
 
             c.IsOfficialDeepSeek = host == "api.deepseek.com" || host.EndsWith(".api.deepseek.com", StringComparison.Ordinal);
-            c.IsDeepSeekV4 = m.Contains("deepseek-v4") || (c.IsOfficialDeepSeek && (m == "deepseek-chat" || m == "deepseek-reasoner"));
+            c.IsDeepSeekV4 = m.Contains("deepseek-v4") || m == "deepseek-flash"
+                || (c.IsOfficialDeepSeek && (m == "deepseek-chat" || m == "deepseek-reasoner"));
             // Interactive Pro orchestration is an explicit model protocol.  The retiring
             // deepseek-chat/reasoner aliases are still covered by V4 wire compatibility on the
             // official endpoint, but must not silently inherit Pro's auto-tool behavior.
             c.IsDeepSeekV4Pro = m == "deepseek-v4-pro";
             // Flash-specific orchestration must never leak into Pro or legacy aliases.  Only an
             // explicit Flash model id opts into the auto-only thinking tool protocol.
-            c.IsDeepSeekV4Flash = m == "deepseek-v4-flash";
+            c.IsDeepSeekV4Flash = m == "deepseek-v4-flash" || m == "deepseek-flash";
             c.IsLegacyDeepSeekAlias = c.IsOfficialDeepSeek && (m == "deepseek-chat" || m == "deepseek-reasoner");
             c.AllowsEmptyChoicesHeartbeat = c.IsDeepSeekV4;
 
