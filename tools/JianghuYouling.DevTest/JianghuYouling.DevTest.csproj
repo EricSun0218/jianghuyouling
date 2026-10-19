@@ -23,6 +23,7 @@
     <Compile Include="..\..\src\JianghuYouling.Frontend\Game\EventLogStore.cs" Link="Production\EventLogStore.cs" />
     <!-- Compile durable text settings used by monthly event prose and ghostwriting. -->
     <Compile Include="..\..\src\JianghuYouling.Frontend\Game\DurableSettingsStore.cs" Link="Production\DurableSettingsStore.cs" />
+    <Compile Include="..\..\src\JianghuYouling.Frontend\Game\CommissionStore.cs" Link="Production\CommissionStore.cs" />
     <Compile Include="..\..\src\JianghuYouling.Frontend\Game\ThinkingPromptRuleStore.cs" Link="Production\ThinkingPromptRuleStore.cs" />
     <Compile Include="..\..\src\JianghuYouling.Frontend\Game\ImageGenerationConfig.cs" Link="Production\ImageGenerationConfig.cs" />
     <Compile Include="..\..\src\JianghuYouling.Frontend\Game\TtsSettings.cs" Link="Production\TtsSettings.cs" />

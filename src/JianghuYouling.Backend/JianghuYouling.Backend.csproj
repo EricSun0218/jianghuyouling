@@ -26,10 +26,12 @@
     <Compile Include="..\JianghuYouling.Core\Behavior\CharacterProxyIdentity.cs" Link="Shared\CharacterProxyIdentity.cs" />
     <Compile Include="..\JianghuYouling.Core\Commission\CommissionRewardPolicy.cs" Link="Shared\CommissionRewardPolicy.cs" />
     <Compile Include="..\JianghuYouling.Core\Commission\CommissionProgressPolicy.cs" Link="Shared\CommissionProgressPolicy.cs" />
+    <Compile Include="..\JianghuYouling.Core\Commission\OutlawNestProgressPolicy.cs" Link="Shared\OutlawNestProgressPolicy.cs" />
   </ItemGroup>
 
   <ItemGroup>
     <Reference Include="GameData"><HintPath>$(Backend)\GameData.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="GameData.Adventure"><HintPath>$(Backend)\GameData.Adventure.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="GameData.Shared"><HintPath>$(Backend)\GameData.Shared.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="GameData.Combat.Math"><HintPath>$(Backend)\GameData.Combat.Math.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="GameData.Serializer"><HintPath>$(Backend)\GameData.Serializer.dll</HintPath><Private>false</Private></Reference>

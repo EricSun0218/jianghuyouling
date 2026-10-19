@@ -28,9 +28,16 @@ namespace JianghuYouling.Core.Commission
 
         private static readonly string[] KillRequests =
         {
-            "系统检索到一名需要清除的目标：{0}。这项任务危险些，奖励也会更丰厚。",
-            "有一项新的清除任务：击杀{0}。我已经按对方的精纯评定了任务品级。",
+            "我从你的仇人中找到了这次的目标：{0}。这项任务危险些，奖励也会更丰厚。",
+            "有一项新的清除任务：击杀你的仇人{0}。我已经按对方的精纯评定了任务品级。",
             "这次是战斗任务，目标为{0}。量力而行，我会一直替你盯着任务进度。",
+        };
+
+        private static readonly string[] OutlawNestRequests =
+        {
+            "外道盘踞，百姓难安。我给你留了一项清剿委托：成功清除任意一处外道巢穴。",
+            "去拔掉一处外道巢穴吧。按你实际清剿的巢穴难度，我会备好相应品级的丰厚奖励。",
+            "这次替江湖除一处祸患：接单后成功清除一处外道巢穴，再来找我领奖。",
         };
 
         private static readonly string[] CompletionLines =
@@ -82,15 +89,17 @@ namespace JianghuYouling.Core.Commission
             if (random == null) throw new ArgumentNullException(nameof(random));
             bool hasKillTarget = targetNpcId > 0 && !string.IsNullOrWhiteSpace(targetNpcName)
                 && targetConsummate >= 0;
-            int kindRoll = random.Next(hasKillTarget ? 4 : 3);
+            int kindRoll = random.Next(hasKillTarget ? 5 : 4);
             string kind = kindRoll == 0 ? CommissionProposalPolicy.CollectResource
                 : kindRoll == 1 ? CommissionProposalPolicy.EarnMoney
                 : kindRoll == 2 ? CommissionProposalPolicy.GainPrestige
+                : kindRoll == 3 ? CommissionProposalPolicy.ClearOutlawNest
                 : CommissionProposalPolicy.KillNpc;
             int resourceType = kind == CommissionProposalPolicy.CollectResource
                 ? random.Next(6) : -1;
             int grade = kind == CommissionProposalPolicy.KillNpc
                 ? CommissionProposalPolicy.RewardGradeForConsummate(targetConsummate)
+                : kind == CommissionProposalPolicy.ClearOutlawNest ? -1
                 : SelectRewardGrade(worldProgress, random.Next());
             CommissionProposalPolicy.AmountRange(kind, out int minimum, out int maximum);
             int amount = ScaledAmount(minimum, maximum, grade, random.Next(1001));
@@ -98,7 +107,8 @@ namespace JianghuYouling.Core.Commission
             string[] requests = kind == CommissionProposalPolicy.CollectResource
                 ? CollectRequests : kind == CommissionProposalPolicy.EarnMoney
                     ? MoneyRequests : kind == CommissionProposalPolicy.GainPrestige
-                        ? PrestigeRequests : KillRequests;
+                        ? PrestigeRequests : kind == CommissionProposalPolicy.ClearOutlawNest
+                            ? OutlawNestRequests : KillRequests;
             return new CommissionProposal
             {
                 Kind = kind,
@@ -145,7 +155,9 @@ namespace JianghuYouling.Core.Commission
                     return "可完成能获得威望的本体事件与行动；按接受委托后的净增量计算，达到或超过目标即可。";
                 case CommissionProposalPolicy.KillNpc:
                     return "目标是" + (proposal.TargetNpcName ?? "指定人物")
-                        + "；任务会直接核验本体死亡状态，目标死亡即可领取，奖励品级按其精纯评定且比普通委托更丰厚。";
+                        + "；发布时只从太吾活着的仇人中选取，发出后和解仍保留。任务会直接核验本体死亡状态，目标死亡即可领取，奖励品级按其精纯评定且比普通委托更丰厚。";
+                case CommissionProposalPolicy.ClearOutlawNest:
+                    return "接单后成功清除任意一处外道巢穴即可；普通胜场、失败退出、义士据点和剑冢都不算。奖励按接单后首次成功清剿的巢穴难度锁定，难度从低到高对应九品至一品，共3至4项。";
                 default:
                     return "打开右侧委托簿即可查看代码核验的实时进度。";
             }

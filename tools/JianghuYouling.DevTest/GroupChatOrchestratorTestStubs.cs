@@ -127,11 +127,6 @@ namespace JianghuYouling
         public static bool ReplaceIdentity(int taiwuId, int oldId, int newId) => true;
     }
 
-    public static class CommissionStore
-    {
-        public static bool ReplaceIdentity(int taiwuId, int oldId, int newId) => true;
-    }
-
     public static class NativeInteractionRecordingStore
     {
         public static bool ReplaceIdentity(int oldId, int newId) => true;

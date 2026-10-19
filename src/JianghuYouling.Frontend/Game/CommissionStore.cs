@@ -40,9 +40,18 @@ namespace JianghuYouling
         public bool IsAssistantCommission => NpcId == CommissionStore.AssistantCommissionerId;
         public string Objective => CommissionProposalPolicy.Objective(Kind, ResourceType, Amount,
             TargetNpcName);
-        public string RewardLabel => CommissionProposalPolicy.GradeName(RewardGrade)
-            + (string.Equals(Kind, CommissionProposalPolicy.KillNpc, StringComparison.Ordinal)
-                ? "丰厚组合奖励（3至4项）" : "组合奖励（2项）");
+        public string RewardLabel => RewardLabelFor(ActualRewardGrade);
+
+        public string RewardLabelFor(int completedGrade)
+        {
+            if (string.Equals(Kind, CommissionProposalPolicy.ClearOutlawNest, StringComparison.Ordinal))
+                return completedGrade >= 0 && completedGrade <= 8
+                    ? CommissionProposalPolicy.GradeName(completedGrade) + "丰厚组合奖励（3至4项）"
+                    : "按首次清剿巢穴的难度结算：由低到高对应九品至一品，3至4项奖励";
+            return CommissionProposalPolicy.GradeName(RewardGrade)
+                + (CommissionProposalPolicy.HasCombatRewards(Kind)
+                    ? "丰厚组合奖励（3至4项）" : "组合奖励（2项）");
+        }
     }
 
     /// <summary>按本体世界隔离的委托状态。领奖使用稳定 OperationId，回调丢失后重试不会重复发奖。</summary>
@@ -321,13 +330,14 @@ namespace JianghuYouling
                 : npcId > 0 && npcId != taiwuId;
             if (taiwuId <= 0 || !validIdentity || currentDate < 0
                 || proposal == null || !CommissionProposalPolicy.IsKind(proposal.Kind)
-                || proposal.RewardGrade < CommissionProposalPolicy.MinRewardGrade
-                || proposal.RewardGrade > CommissionProposalPolicy.MaxRewardGrade
+                || !CommissionProposalPolicy.ValidOfferedRewardGrade(proposal.Kind, proposal.RewardGrade)
                 || string.IsNullOrWhiteSpace(proposal.OfferText)) return false;
             if (assistantCommission && (string.Equals(proposal.Kind,
                     CommissionProposalPolicy.DeliverResource, StringComparison.Ordinal)
                 || string.Equals(proposal.Kind, CommissionProposalPolicy.IncreaseFavor,
                     StringComparison.Ordinal))) return false;
+            if (!assistantCommission && string.Equals(proposal.Kind,
+                    CommissionProposalPolicy.ClearOutlawNest, StringComparison.Ordinal)) return false;
             if (!CommissionProposalPolicy.AmountRange(proposal.Kind, out int min, out int max)
                 || proposal.Amount < min || proposal.Amount > max) return false;
             if (string.Equals(proposal.Kind, CommissionProposalPolicy.KillNpc,
@@ -408,8 +418,9 @@ namespace JianghuYouling
                 || value.NpcId == taiwuId
                 || value.AcceptedDate < 0 || value.ClaimedDate < -1
                 || !CommissionProposalPolicy.IsKind(value.Kind)
-                || value.RewardGrade < CommissionProposalPolicy.MinRewardGrade
-                || value.RewardGrade > CommissionProposalPolicy.MaxRewardGrade
+                || !CommissionProposalPolicy.ValidOfferedRewardGrade(value.Kind, value.RewardGrade)
+                || (!value.IsAssistantCommission && string.Equals(value.Kind,
+                    CommissionProposalPolicy.ClearOutlawNest, StringComparison.Ordinal))
                 || !CommissionProposalPolicy.AmountRange(value.Kind, out int min, out int max)
                 || value.Amount < min || value.Amount > max
                 || (string.Equals(value.Kind, CommissionProposalPolicy.KillNpc,

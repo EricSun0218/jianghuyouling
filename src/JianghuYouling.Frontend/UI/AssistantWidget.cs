@@ -875,42 +875,10 @@ namespace JianghuYouling
             int generation = WorldLifecycle.Generation;
             uint worldId = WorldLifecycle.WorldId;
             if (!WorldLifecycle.IsSameWorld(generation) || worldId == 0) return;
-            int killTargetId = -1;
-            string killTargetName = null;
-            try
-            {
-                if (ConversationSessionIndexStore.TryLoadSingles(taiwu,
-                        out List<ConversationSessionIndexStore.SingleEntry> chatted))
-                {
-                    var candidates = new List<ConversationSessionIndexStore.SingleEntry>();
-                    foreach (ConversationSessionIndexStore.SingleEntry entry in chatted)
-                    {
-                        if (entry == null || entry.NpcId <= 0 || entry.NpcId == taiwu
-                            || entry.PlayerConversations <= 0
-                            || string.IsNullOrWhiteSpace(entry.Name)) continue;
-                        int resolved = CharacterProxyIdentityService.ResolveKnown(taiwu,
-                            entry.NpcId);
-                        if (resolved <= 0 || resolved == taiwu) continue;
-                        candidates.Add(new ConversationSessionIndexStore.SingleEntry
-                        {
-                            NpcId = resolved, Name = entry.Name,
-                            PlayerConversations = entry.PlayerConversations,
-                        });
-                    }
-                    if (candidates.Count > 0)
-                    {
-                        ConversationSessionIndexStore.SingleEntry candidate = candidates[
-                            UnityEngine.Random.Range(0, candidates.Count)];
-                        killTargetId = candidate.NpcId;
-                        killTargetName = candidate.Name;
-                    }
-                }
-            }
-            catch { killTargetId = -1; killTargetName = null; }
             _commissionQueryPending = true;
             int queryToken = unchecked(++_commissionQueryToken);
             EffectHandler.QueryCommissionSnapshot(taiwu,
-                CommissionStore.AssistantCommissionerId, killTargetId, snapshot =>
+                CommissionStore.AssistantCommissionerId, -1, snapshot =>
                 {
                     if (queryToken != _commissionQueryToken) return;
                     _commissionQueryPending = false;
@@ -938,14 +906,16 @@ namespace JianghuYouling
                         CommissionProposal proposal = AssistantCommissionPolicy.Create(
                             snapshot.WorldProgress, random,
                             snapshot.TargetValid ? snapshot.TargetNpcId : -1,
-                            snapshot.TargetValid ? killTargetName : null,
+                            snapshot.TargetValid ? snapshot.TargetNpcName : null,
                             snapshot.TargetValid ? snapshot.TargetConsummate : -1);
                         int baseline = proposal.Kind == CommissionProposalPolicy.CollectResource
                             ? snapshot.Resources[proposal.ResourceType]
                             : proposal.Kind == CommissionProposalPolicy.EarnMoney
                                 ? snapshot.Resources[6]
                                 : proposal.Kind == CommissionProposalPolicy.GainPrestige
-                                    ? snapshot.Resources[7] : 0;
+                                    ? snapshot.Resources[7]
+                                    : proposal.Kind == CommissionProposalPolicy.ClearOutlawNest
+                                        ? snapshot.OutlawNestCount : 0;
                         const int ResourceLimit = 999999999;
                         if (baseline < 0 || baseline > ResourceLimit - proposal.Amount) continue;
                         if (!CommissionStore.TryIssueAssistant(taiwu, currentDate, proposal,
@@ -969,7 +939,7 @@ namespace JianghuYouling
                         return;
                     }
                     Debug.Log("[JHYL_ASSISTANT_COMMISSION_SKIPPED] all_targets_near_cap");
-                });
+                }, selectKillTarget: true);
         }
 
         private sealed class InteractivePriorityLease : System.IDisposable

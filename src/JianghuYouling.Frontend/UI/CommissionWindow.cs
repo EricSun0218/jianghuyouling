@@ -87,13 +87,13 @@ namespace JianghuYouling
                 _currentDate);
             if (records.Count == 0)
             {
-                AddInfo("尚无人物向太吾发布委托。\n\nNPC 会在对话中自主提出；灵儿会按设置的现实时间间隔用代码随机生成委托，允许多项同时进行，品级概率随本体世界进度变化且各品级始终有机会。全部进行中任务只作为她的对话上下文，不写入长期记忆。右侧【委】负责查看记录、进度和领取奖励。");
+                AddInfo("尚无人物向太吾发布委托。\n\nNPC 会在对话中自主提出；灵儿按设置的现实时间间隔用代码随机生成委托，允许多项同时进行。灵儿普通任务的品级概率随世界进度变化；她的击杀任务只选太吾活着的仇人，品级按目标精纯评定；清剿任务要求接单后成功清除一处外道巢穴，奖励品级按实际巢穴难度结算。全部进行中任务只作为她的对话上下文，不写入长期记忆。右侧【委】负责查看记录、进度和领取奖励。");
                 return;
             }
             int active = 0;
             foreach (CommissionRecord record in records) if (record.IsActive) active++;
             AddInfo("<color=#E7B958><b>进行中 " + active + "</b></color>　"
-                + "完成后可直接在右侧委托簿领取；普通任务固定获得2项组合奖励，击杀任务固定获得更丰厚的3至4项组合奖励。",
+                + "完成后可直接在右侧委托簿领取；普通任务获得2项组合奖励，击杀与清剿外道巢穴任务获得更丰厚的3至4项组合奖励。",
                 16f, Text);
             foreach (CommissionRecord record in records)
                 AddRecord(record, version);
@@ -199,7 +199,7 @@ namespace JianghuYouling
                 body.text = GlyphSanitizer.Clean("<color=#CDB87D>请求：</color>"
                     + Escape(record.OfferText) + "\n<color=#CDB87D>任务：</color>"
                     + Escape(record.Objective) + "\n<color=#CDB87D>奖励：</color>"
-                    + Escape(record.RewardLabel) + "\n<color=#84C9A9>进度："
+                    + Escape(record.RewardLabelFor(snapshot.OutlawRewardGrade)) + "\n<color=#84C9A9>进度："
                     + Math.Min(progress, record.Amount) + " / " + record.Amount
                     + "</color>　<color=#8F9993>完成后可直接领取</color>");
                 claim.interactable = completed;
@@ -207,7 +207,7 @@ namespace JianghuYouling
                 claim.onClick.RemoveAllListeners();
                 if (claim.interactable)
                     claim.onClick.AddListener(() => Claim(record, claim, body));
-            });
+            }, record.Kind == CommissionProposalPolicy.ClearOutlawNest ? record.BaselineValue : -1);
         }
 
         private static void Claim(CommissionRecord record, Button button, TextMeshProUGUI body)

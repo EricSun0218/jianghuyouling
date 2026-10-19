@@ -8,10 +8,15 @@ namespace JianghuYouling.BackendContractTests
 {
     internal static class BackendCombatContractTests
     {
-        private static int Main()
+        private static int Main(string[] args)
         {
             try
             {
+                if (args.Length == 2 && args[0] == "--outlaw-nest-hook")
+                {
+                    OutlawNestHookTests.Run(Environment.GetEnvironmentVariable("TAIWU_GAME_DIR"), args[1]);
+                    return 0;
+                }
                 CharacterProxyArchiveTests.Run();
                 string root = FindRepositoryRoot();
                 string rpc = Read(root, "src", "Shared", "RpcConst.cs");

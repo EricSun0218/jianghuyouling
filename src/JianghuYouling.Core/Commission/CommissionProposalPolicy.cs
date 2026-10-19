@@ -31,6 +31,7 @@ namespace JianghuYouling.Core.Commission
         public const string GainPrestige = "gain_prestige";
         public const string IncreaseFavor = "increase_favor";
         public const string KillNpc = "kill_npc";
+        public const string ClearOutlawNest = "clear_outlaw_nest";
         public const int MinRewardGrade = 0;
         public const int MaxRewardGrade = 8;
         public const int MaxDialogueChars = 300;
@@ -59,7 +60,16 @@ namespace JianghuYouling.Core.Commission
                 || string.Equals(kind, EarnMoney, StringComparison.Ordinal)
                 || string.Equals(kind, GainPrestige, StringComparison.Ordinal)
                 || string.Equals(kind, IncreaseFavor, StringComparison.Ordinal)
-                || string.Equals(kind, KillNpc, StringComparison.Ordinal);
+                || string.Equals(kind, KillNpc, StringComparison.Ordinal)
+                || string.Equals(kind, ClearOutlawNest, StringComparison.Ordinal);
+
+        public static bool HasCombatRewards(string kind)
+            => string.Equals(kind, KillNpc, StringComparison.Ordinal)
+                || string.Equals(kind, ClearOutlawNest, StringComparison.Ordinal);
+
+        public static bool ValidOfferedRewardGrade(string kind, int grade)
+            => string.Equals(kind, ClearOutlawNest, StringComparison.Ordinal)
+                ? grade == -1 : grade >= MinRewardGrade && grade <= MaxRewardGrade;
 
         public static bool NeedsResource(string kind)
             => string.Equals(kind, DeliverResource, StringComparison.Ordinal)
@@ -110,7 +120,8 @@ namespace JianghuYouling.Core.Commission
                 return false;
             }
             string kind = (root["kind"]?.ToString() ?? string.Empty).Trim();
-            if (!IsKind(kind))
+            // 清巢是灵儿的代码任务，不能由 NPC / 模型发布。
+            if (!IsKind(kind) || string.Equals(kind, ClearOutlawNest, StringComparison.Ordinal))
             {
                 error = "选择了不受支持的委托类型";
                 return false;
@@ -186,6 +197,7 @@ namespace JianghuYouling.Core.Commission
                 case GainPrestige: min = 100; max = 8000; return true;
                 case IncreaseFavor: min = 300; max = 5000; return true;
                 case KillNpc: min = max = 1; return true;
+                case ClearOutlawNest: min = max = 1; return true;
                 default: min = max = 0; return false;
             }
         }
@@ -203,6 +215,7 @@ namespace JianghuYouling.Core.Commission
                 case IncreaseFavor: return "令委托人对太吾的好感增加 " + amount;
                 case KillNpc: return "杀死 " + (string.IsNullOrWhiteSpace(targetNpcName)
                     ? "指定人物" : targetNpcName.Trim());
+                case ClearOutlawNest: return "接单后成功清除任意 1 处外道巢穴";
                 default: return "未知委托";
             }
         }

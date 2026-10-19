@@ -78,6 +78,9 @@ namespace JianghuYouling.Effects
         public int TargetNpcId = -1;
         public int TargetConsummate = -1;
         public int TargetRewardGrade = -1;
+        public string TargetNpcName;
+        public int OutlawNestCount;
+        public int OutlawRewardGrade = -1;
 
         public int CurrentValue(CommissionRecord record)
         {
@@ -92,6 +95,7 @@ namespace JianghuYouling.Effects
                 case "gain_prestige": return Resources[7];
                 case "increase_favor": return Favor;
                 case "kill_npc": return TargetDead ? 1 : 0;
+                case OutlawNestProgressPolicy.Kind: return OutlawNestCount;
                 default: return 0;
             }
         }
@@ -1410,7 +1414,8 @@ namespace JianghuYouling.Effects
             => QueryCommissionSnapshot(taiwuId, npcId, -1, onResult);
 
         public static void QueryCommissionSnapshot(int taiwuId, int npcId, int targetNpcId,
-            Action<CommissionSnapshot> onResult)
+            Action<CommissionSnapshot> onResult, int outlawBaseline = -1,
+            bool selectKillTarget = false)
         {
             if (taiwuId <= 0 || npcId < CommissionStore.AssistantCommissionerId
                 || taiwuId == npcId)
@@ -1420,6 +1425,8 @@ namespace JianghuYouling.Effects
                 {
                     d.Set("taiwu", taiwuId); d.Set("npc", npcId);
                     if (targetNpcId > 0) d.Set("target", targetNpcId);
+                    d.Set("outlaw_baseline", outlawBaseline);
+                    d.Set("select_kill_target", selectKillTarget);
                 },
                 resp =>
                 {
@@ -1432,6 +1439,9 @@ namespace JianghuYouling.Effects
                     resp?.Get("target_id", out result.TargetNpcId);
                     resp?.Get("target_consummate", out result.TargetConsummate);
                     resp?.Get("target_reward_grade", out result.TargetRewardGrade);
+                    resp?.Get("target_name", out result.TargetNpcName);
+                    resp?.Get("outlaw_count", out result.OutlawNestCount);
+                    resp?.Get("outlaw_reward_grade", out result.OutlawRewardGrade);
                     string csv = null; resp?.Get("resources", out csv);
                     if (!string.IsNullOrWhiteSpace(csv))
                     {

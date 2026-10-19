@@ -40,7 +40,7 @@ namespace JianghuYouling.Backend
     /// 《江湖有灵》后端薄插件:跑在后端逻辑线程,持有真实游戏域(Character/Taiwu…)。
     /// 仅暴露需后端权限的写操作 + RPC 入口。M1 先只有一个 Ping 验证前后端通路。
     /// </summary>
-    [PluginConfig("江湖有灵 Backend", "jianghuyouling", "0.34.0.35")]
+    [PluginConfig("江湖有灵 Backend", "jianghuyouling", "0.34.0.36")]
     public sealed class BackendPluginMain : TaiwuRemakePlugin
     {
         private const int DefaultNpcTravelDurationMonths = 6;
@@ -106,6 +106,7 @@ namespace JianghuYouling.Backend
         {
             // JHYL_REGISTERED_RPC_METHOD_COUNT_21：旧直改外貌 RPC 已移除，只保留当前正式接口。
             _modIdStr = base.ModIdStr;
+            OutlawNestCommissionProgress.ModId = _modIdStr;
             _harmony = new Harmony(GetGuid() + ".native-interaction-audit");
             _harmony.PatchAll(typeof(BackendPluginMain).Assembly);
             // 注册带参带返回的 RPC 方法。内部 key = ModIdStr + ".Method." + "Ping"
@@ -1290,6 +1291,8 @@ namespace JianghuYouling.Backend
                         int taiwuId = 0, npcId = 0, targetId = -1;
                         p.Get("taiwu", out taiwuId); p.Get("npc", out npcId);
                         p.Get("target", out targetId);
+                        bool selectKillTarget = false;
+                        p.Get("select_kill_target", out selectKillTarget);
                         bool assistantCommission = npcId == 0;
                         Character tw, npc = null;
                         if (taiwuId <= 0 || npcId < 0 || taiwuId == npcId
@@ -1316,13 +1319,25 @@ namespace JianghuYouling.Backend
                         snapshot.Set("resources", string.Join(",", resources));
                         snapshot.Set("favor", favor);
                         snapshot.Set("world_progress", (int)DomainManager.World.GetXiangshuLevel());
+                        if (assistantCommission && selectKillTarget)
+                            targetId = SelectAssistantCommissionKillTarget(context, taiwuId);
+                        int outlawBaseline = -1;
+                        if (!p.Get("outlaw_baseline", out outlawBaseline)) outlawBaseline = -1;
+                        int outlawCount = 0, outlawGrade = -1;
+                        if (assistantCommission && (selectKillTarget || outlawBaseline >= 0))
+                            OutlawNestCommissionProgress.Read(taiwuId, outlawBaseline,
+                                out outlawCount, out outlawGrade);
+                        snapshot.Set("outlaw_count", outlawCount);
+                        snapshot.Set("outlaw_reward_grade", outlawGrade);
                         bool targetValid = false, targetDead = false;
                         int targetConsummate = -1, targetRewardGrade = -1;
                         if (targetId > 0 && targetId != taiwuId && targetId != npcId)
                         {
                             Character target;
                             targetValid = DomainManager.Character.TryGetElement_Objects(
-                                targetId, out target) && target != null;
+                                targetId, out target) && target != null
+                                && DomainManager.Character.IsCharacterAlive(targetId)
+                                && DomainManager.Character.TryGetDeadCharacter(targetId) == null;
                             if (targetValid)
                             {
                                 targetConsummate = target.GetConsummateLevel();
@@ -1342,6 +1357,7 @@ namespace JianghuYouling.Backend
                         snapshot.Set("target_valid", targetValid);
                         snapshot.Set("target_dead", targetDead);
                         snapshot.Set("target_id", targetId);
+                        snapshot.Set("target_name", targetValid ? ShownName(targetId) : string.Empty);
                         snapshot.Set("target_consummate", targetConsummate);
                         snapshot.Set("target_reward_grade", targetRewardGrade);
                         return snapshot;
@@ -3320,6 +3336,27 @@ namespace JianghuYouling.Backend
             public bool ItemCreated;
         }
 
+        private static int SelectAssistantCommissionKillTarget(DataContext context, int taiwuId)
+        {
+            // Enemies 是太吾主动视为仇人的集合；RelatedEnemies 方向相反，不能混入。
+            var enemies = DomainManager.Character.GetRelatedCharactersForRelations(taiwuId)
+                ?.Enemies.GetCollection();
+            if (enemies == null || enemies.Count == 0) return -1;
+            var candidates = new List<int>();
+            var seen = new HashSet<int>();
+            foreach (int enemyId in enemies)
+            {
+                int targetId = ResolveCharacterProxyId(enemyId);
+                if (targetId <= 0 || targetId == taiwuId || !seen.Add(targetId)
+                    || !DomainManager.Character.IsCharacterAlive(targetId)
+                    || DomainManager.Character.TryGetDeadCharacter(targetId) != null
+                    || !DomainManager.Character.TryGetElement_Objects(targetId, out Character target)
+                    || target == null || string.IsNullOrWhiteSpace(ShownName(targetId))) continue;
+                candidates.Add(targetId);
+            }
+            return candidates.Count == 0 ? -1 : candidates[context.Random.Next(candidates.Count)];
+        }
+
         private sealed class CommissionRewardTemplate
         {
             public sbyte ItemType;
@@ -3338,11 +3375,14 @@ namespace JianghuYouling.Backend
             parameter.Get("reward_grade", out rewardGrade);
             parameter.Get("target", out targetId);
             bool assistantCommission = npcId == 0;
+            bool outlawCommission = string.Equals(kind, OutlawNestProgressPolicy.Kind,
+                StringComparison.Ordinal);
             if (taiwuId <= 0 || npcId < 0 || taiwuId == npcId
                 || taiwuId != DomainManager.Taiwu.GetTaiwuCharId()
                 || !CommissionAmountRange(kind, out int minAmount, out int maxAmount)
                 || amount < minAmount || amount > maxAmount || baseline < 0
-                || rewardGrade < 0 || rewardGrade > 8
+                || (outlawCommission ? rewardGrade != -1 || !assistantCommission
+                    : rewardGrade < 0 || rewardGrade > 8)
                 || (CommissionNeedsResource(kind) && (resourceType < 0 || resourceType > 5))
                 || (string.Equals(kind, "kill_npc", StringComparison.Ordinal)
                     && (targetId <= 0 || targetId == taiwuId || targetId == npcId))
@@ -3357,11 +3397,16 @@ namespace JianghuYouling.Backend
                     && (!DomainManager.Character.TryGetElement_Objects(npcId, out npc) || npc == null)))
                 return Fail("invalid_char", "委托人物已失效");
 
-            int current = CommissionCurrentValue(taiwu, npcId, taiwuId, kind, resourceType,
-                targetId);
+            int current;
+            if (outlawCommission)
+            {
+                // 品级只从本体保存的首次完成事实取，绝不接受前端传来的品级。
+                OutlawNestCommissionProgress.Read(taiwuId, baseline, out current, out rewardGrade);
+            }
+            else current = CommissionCurrentValue(taiwu, npcId, taiwuId, kind, resourceType, targetId);
             int target = CommissionProgressPolicy.TargetValue(kind, baseline, amount);
             bool completed = CommissionProgressPolicy.IsCompleted(kind, current, baseline, amount);
-            if (!completed)
+            if (!completed || (outlawCommission && rewardGrade < 0))
                 return Fail("commission_incomplete", "委托尚未完成（当前 " + current
                     + " / 目标 " + target + "）");
 
@@ -3379,7 +3424,7 @@ namespace JianghuYouling.Backend
                     deliveryMoved = true;
                 }
                 bool killCommission = string.Equals(kind, "kill_npc", StringComparison.Ordinal);
-                int rewardCount = killCommission ? 3 + context.Random.Next(2) : 2;
+                int rewardCount = killCommission || outlawCommission ? 3 + context.Random.Next(2) : 2;
                 for (int rewardIndex = 0; rewardIndex < rewardCount; rewardIndex++)
                 {
                     CommissionRewardGrant reward = GrantRandomCommissionReward(context, taiwu,
@@ -3429,6 +3474,7 @@ namespace JianghuYouling.Backend
                 case "gain_prestige": min = 100; max = 8000; return true;
                 case "increase_favor": min = 300; max = 5000; return true;
                 case "kill_npc": min = max = 1; return true;
+                case OutlawNestProgressPolicy.Kind: min = max = 1; return true;
                 default: min = max = 0; return false;
             }
         }

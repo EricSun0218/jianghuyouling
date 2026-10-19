@@ -37,6 +37,11 @@ namespace JianghuYouling.DevTest
             Console.OutputEncoding = System.Text.Encoding.UTF8;
             try
             {
+            if (args != null && Array.Exists(args, a => string.Equals(a, "--commission-only", StringComparison.OrdinalIgnoreCase)))
+            {
+                CommissionPolicyTests.Run();
+                return 0;
+            }
             if (args != null && Array.Exists(args, a => string.Equals(a, "--conversation-summary-only", StringComparison.OrdinalIgnoreCase)))
             {
                 ManualConversationSummaryTests.Run();
