@@ -37,6 +37,11 @@ namespace JianghuYouling.DevTest
             Console.OutputEncoding = System.Text.Encoding.UTF8;
             try
             {
+            if (args != null && Array.Exists(args, a => string.Equals(a, "--conversation-summary-only", StringComparison.OrdinalIgnoreCase)))
+            {
+                ManualConversationSummaryTests.Run();
+                return 0;
+            }
             if (args != null && Array.Exists(args, a => string.Equals(a, "--telemetry-only", StringComparison.OrdinalIgnoreCase)))
             {
                 await TelemetryTests.Run();
@@ -311,6 +316,7 @@ namespace JianghuYouling.DevTest
             }
 
             await TelemetryTests.Run();
+            ManualConversationSummaryTests.Run();
             MonthlyRecoveryTests.Run();
             TestInfluence();
             TestDeadCleanup();

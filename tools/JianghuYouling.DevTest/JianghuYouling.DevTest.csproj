@@ -45,6 +45,7 @@
     <Compile Include="..\..\src\JianghuYouling.Frontend\Game\StructuredWorldBookStore.cs" Link="Production\StructuredWorldBookStore.cs" />
     <Compile Include="..\..\src\JianghuYouling.Frontend\Talk\ConversationSessionIndexStore.cs" Link="Production\ConversationSessionIndexStore.cs" />
     <Compile Include="..\..\src\JianghuYouling.Frontend\UI\LongTextEditorOperationGate.cs" Link="Production\LongTextEditorOperationGate.cs" />
+    <Compile Include="..\..\src\JianghuYouling.Frontend\UI\ConversationHistoryLayout.cs" Link="Production\ConversationHistoryLayout.cs" />
     <Compile Include="..\..\src\JianghuYouling.Frontend\Game\MonthlyAgentRequestBudget.cs" Link="Production\MonthlyAgentRequestBudget.cs" />
     <Compile Include="..\..\src\JianghuYouling.Frontend\Game\SettingsBatchTransaction.cs" Link="Production\SettingsBatchTransaction.cs" />
     <Compile Include="..\..\src\JianghuYouling.Frontend\Game\LlmProfileStore.cs" Link="Production\LlmProfileStore.cs" />

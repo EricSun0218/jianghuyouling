@@ -571,7 +571,8 @@ namespace JianghuYouling
             lock (ConversationGate) return CurrentClearEpoch(ConversationKey(taiwuId, npcId));
         }
 
-        private static CompactionLease TryBeginCompaction(Conversation c)
+        private static CompactionLease TryBeginCompaction(Conversation c,
+            System.Threading.CancellationToken cancellationToken = default)
         {
             if (!ConversationStillCurrent(c)) return null;
             lock (ConversationGate)
@@ -583,7 +584,8 @@ namespace JianghuYouling
                 {
                     Key = c.CacheKey,
                     Token = token,
-                    Cancellation = new System.Threading.CancellationTokenSource(),
+                    Cancellation = System.Threading.CancellationTokenSource.CreateLinkedTokenSource(
+                        cancellationToken),
                 };
                 ActiveCompactions[c.CacheKey] = lease;
                 return lease;
@@ -602,6 +604,7 @@ namespace JianghuYouling
             }
             finally
             {
+                try { lease.Cancellation?.Cancel(); } catch { }
                 try { lease.Cancellation?.Dispose(); } catch { }
             }
         }
@@ -702,6 +705,46 @@ namespace JianghuYouling
             return true;
         }
 
+        /// <summary>手动整理当前全部未压缩内容。范围在点击时固定，其余与自动压缩共用同一提交链。</summary>
+        internal static bool TrySummarizeConversation(int taiwuId, int npcId, string npcName,
+            int currentDate, System.Threading.CancellationToken cancellationToken,
+            Action<bool, string> onCompleted, out string error)
+        {
+            error = null;
+            if (taiwuId <= 0 || npcId < 0 || !WorldLifecycle.HasWorldIdentity
+                || cancellationToken.IsCancellationRequested)
+            { error = "当前对话不可用，尚未总结"; return false; }
+            Conversation conversation = GetConv(taiwuId, npcId);
+            if (!conversation.LoadReliable || !ConversationStillCurrent(conversation))
+            { error = "对话记录尚未可靠载入，原记录保持不变"; return false; }
+            int cut = conversation.Turns?.Count ?? 0;
+            if (cut == 0)
+            { error = "自上次压缩后没有需要总结的新内容"; return false; }
+            if (!LlmService.IsConfigured)
+            { error = "请先配置模型接口，再总结对话"; return false; }
+            TalkEntryHost host = TalkEntryHost.Instance;
+            if (host == null)
+            { error = "聊天宿主尚未就绪，请稍后重试"; return false; }
+            CompactionLease lease = TryBeginCompaction(conversation, cancellationToken);
+            if (lease == null)
+            { error = "该对话正在整理，请完成后再总结"; return false; }
+            try
+            {
+                int generation = WorldLifecycle.Generation;
+                var trace = LlmTraceContext.NewRun(conversation.WorldId + ":" + taiwuId + ":" + npcId);
+                host.StartCoroutine(RunCompactionAfterCommit(conversation, npcName, currentDate, cut,
+                    generation, trace, lease, onCompleted));
+                return true;
+            }
+            catch (Exception ex)
+            {
+                EndCompaction(conversation, lease);
+                Debug.LogWarning("[JHYL_COMPACTION_MANUAL_START_FAILED] error=" + ex.GetType().Name);
+                error = "总结未能启动，原记录保持不变，请重试";
+                return false;
+            }
+        }
+
         // JHYL_COMPACTION_OUT_OF_REPLY_CRITICAL_PATH：正文及动作父记录已经可靠提交后才调度。
         // 后台协程第一步就让出一帧，当前帧不构造提示也不启动网络请求，正文可先真正渲染。
         private static void ScheduleCompactionAfterCommit(Conversation conversation, string npcName, int currentDate,
@@ -735,24 +778,29 @@ namespace JianghuYouling
         }
 
         private static IEnumerator RunCompactionAfterCommit(Conversation conversation, string npcName, int currentDate,
-            int cut, int worldGeneration, LlmTraceContext traceRoot, CompactionLease lease)
+            int cut, int worldGeneration, LlmTraceContext traceRoot, CompactionLease lease,
+            Action<bool, string> onCompleted = null)
         {
-            // JHYL_COMPACTION_DEFER_FIRST_FRAME：StartCoroutine 会同步执行至首个 yield；
-            // 因此必须在任何整理计算/请求之前先归还当前 UI 帧。
-            yield return null;
             var elapsed = System.Diagnostics.Stopwatch.StartNew();
+            bool conversationCommitted = false;
+            string failure = "总结未完成，原文和旧梗概仍保留，请稍后重试";
             try
             {
+                // JHYL_COMPACTION_DEFER_FIRST_FRAME：StartCoroutine 会同步执行至首个 yield；
+                // 因此必须在任何整理计算/请求之前先归还当前 UI 帧。首帧也在 finally 保护内。
+                yield return null;
                 var ct = lease.Cancellation.Token;
                 if (ct.IsCancellationRequested || !WorldLifecycle.IsSameWorld(worldGeneration)
                     || !ConversationStillCurrent(conversation) || conversation.Turns == null
-                    || cut <= 0 || cut > conversation.Turns.Count) yield break;
+                    || cut <= 0 || cut > conversation.Turns.Count)
+                { failure = "总结已取消或对话记录已变化，未应用本次结果"; yield break; }
 
                 var old = conversation.Turns.GetRange(0, cut);
                 string summaryAtStart = conversation.Summary;
                 string summarySourceHashAtStart = conversation.SummarySourceHash;
                 OpenAiCompatibleClient compactClient = LlmService.GetBackgroundClient();
-                if (compactClient == null) yield break;
+                if (compactClient == null)
+                { failure = "模型接口暂不可用，原记录保持不变"; yield break; }
 
                 var maintenanceTask = compactClient.SendAsyncWithTrace(
                     ConversationMaintenance.BuildMessages(npcName, summaryAtStart, old),
@@ -761,12 +809,14 @@ namespace JianghuYouling
                 while (!maintenanceTask.IsCompleted)
                 {
                     if (ct.IsCancellationRequested || !WorldLifecycle.IsSameWorld(worldGeneration)
-                        || !ConversationStillCurrent(conversation)) yield break;
+                        || !ConversationStillCurrent(conversation))
+                    { failure = "总结已取消或对话记录已变化，未应用本次结果"; yield break; }
                     yield return null;
                 }
                 if (ct.IsCancellationRequested || !WorldLifecycle.IsSameWorld(worldGeneration)
                     || !CompactionPrefixStillCurrent(conversation, old, summaryAtStart, summarySourceHashAtStart))
                 {
+                    failure = "对话记录已变化，未应用本次总结，请重新尝试";
                     Debug.Log("[JHYL_COMPACTION_BACKGROUND_STALE] npc=" + conversation.NpcId);
                     yield break;
                 }
@@ -837,7 +887,6 @@ namespace JianghuYouling
                 bool archiveSaved = false;
                 bool memoryRollbackAttempted = false;
                 bool conversationCommitFailed = false;
-                bool conversationCommitted = false;
                 if (!string.IsNullOrWhiteSpace(compactedSummary) && memoryFlushSaved
                     && !string.IsNullOrWhiteSpace(compactionSourceHash)
                     && CompactionPrefixStillCurrent(conversation, old, summaryAtStart, summarySourceHashAtStart))
@@ -885,6 +934,7 @@ namespace JianghuYouling
                     }
                     if (!archiveSaved)
                     {
+                        failure = "原文归档未成功，未应用总结；原文和旧梗概仍保留";
                         memoryRollbackAttempted = true;
                         bool rolledBack = RollbackCompactionMemories(conversation.TaiwuId, conversation.NpcId,
                             rollbackSourceIds, priorCompactionEntries);
@@ -895,6 +945,7 @@ namespace JianghuYouling
 
                 if (conversationCommitFailed)
                 {
+                    failure = "总结保存未成功，原文和旧梗概仍保留，请重试";
                     bool rolledBack = RollbackCompactionMemories(conversation.TaiwuId, conversation.NpcId,
                         rollbackSourceIds, priorCompactionEntries);
                     Debug.LogWarning("[江湖有灵] 后台压缩会话提交失败，保留原文；记忆撤回="
@@ -915,7 +966,14 @@ namespace JianghuYouling
                         + " cut=" + old.Count + " elapsed_ms=" + elapsed.ElapsedMilliseconds);
                 }
             }
-            finally { EndCompaction(conversation, lease); }
+            finally
+            {
+                EndCompaction(conversation, lease);
+                // 手动入口只在整个耐久提交链结束后报告成功；回调异常不能影响已保存的数据。
+                try { onCompleted?.Invoke(conversationCommitted, conversationCommitted ? null : failure); }
+                catch (Exception ex)
+                { Debug.LogWarning("[JHYL_COMPACTION_CALLBACK_FAILED] error=" + ex.GetType().Name); }
+            }
         }
 
         private static Conversation ReadConversationRecoverable(string path, uint worldId, int taiwuId, int npcId)
@@ -1739,6 +1797,26 @@ namespace JianghuYouling
                 var snapshot = new List<TalkTurn>(source?.Count ?? 0);
                 if (source != null) foreach (var turn in source) snapshot.Add(CloneTurn(turn));
                 return snapshot;
+            }
+        }
+
+        /// <summary>归档原文仍可阅读，但不能通过只支持 live turns 的删除、重试或生图写回接口修改。</summary>
+        internal static bool AreTurnsLive(int taiwuId, int npcId, IReadOnlyList<TalkTurn> turns)
+        {
+            if (turns == null || turns.Count == 0) return true;
+            lock (ConversationGate)
+            {
+                var conversation = GetConv(taiwuId, npcId);
+                if (!conversation.LoadReliable || conversation.Turns == null) return false;
+                foreach (var target in turns)
+                {
+                    if (target == null) continue;
+                    if (!conversation.Turns.Exists(current => current != null
+                        && (!string.IsNullOrEmpty(target.Id)
+                            ? string.Equals(current.Id, target.Id, StringComparison.Ordinal)
+                            : SameLegacyTurn(current, target)))) return false;
+                }
+                return true;
             }
         }
 

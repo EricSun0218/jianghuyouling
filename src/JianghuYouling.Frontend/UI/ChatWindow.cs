@@ -69,6 +69,12 @@ namespace JianghuYouling
         readonly List<Button> _assistantActionButtons = new List<Button>();
         readonly List<GameObject> _assistantActionControls = new List<GameObject>();
         bool _assistantDiagnosticExportBusy;
+        Button _summarizeButton;
+        GameObject _summarizeButtonGo;
+        TextMeshProUGUI _summarizeLabel;
+        TextMeshProUGUI _summaryStatusText;
+        CancellationTokenSource _summaryCancellation;
+        int _summaryWorldGeneration;
         Button _personaButton;
         GameObject _personaButtonGo;
         TextMeshProUGUI _taiwuActionHint;
@@ -1434,6 +1440,68 @@ namespace JianghuYouling
             return true;
         }
 
+        void SummarizeConversation()
+        {
+            if (_assistantMode || _groupMode || _busy || _combatTransitionBusy
+                || _taiwuId <= 0 || _npcId < 0 || _requiresProxyBeforeMessage) return;
+            if (NpcProactiveChatScheduler.IsGeneratingFor(_taiwuId, _npcId))
+            { AppendSys("（对方正在回复，请等本轮完成后再总结）"); return; }
+            CancelContactModeRefresh();
+            CancelPendingSuggestion();
+            CancelPendingDictation();
+            int generation = WorldLifecycle.Generation;
+            var cancellation = new CancellationTokenSource();
+            _summaryCancellation = cancellation;
+            _summaryWorldGeneration = generation;
+            _busy = true;
+            SetSendMode(true);
+            GameObject status = AddBubble(BubbleKind.Sys, "（正在总结对话，可点击“中断”取消……）");
+            _summaryStatusText = status != null ? status.GetComponentInChildren<TextMeshProUGUI>() : null;
+            ScrollDown();
+            try
+            {
+                if (!TalkOrchestrator.TrySummarizeConversation(_taiwuId, _npcId, _npcName,
+                    CurrentDate(), cancellation.Token,
+                    (ok, error) => FinishConversationSummary(cancellation, generation, ok, error),
+                    out string startError))
+                    FinishConversationSummary(cancellation, generation, false, startError);
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning("[JHYL_COMPACTION_MANUAL_UI_FAILED] error=" + ex.GetType().Name);
+                FinishConversationSummary(cancellation, generation, false,
+                    "总结未能启动，原记录保持不变，请重试");
+            }
+        }
+
+        void FinishConversationSummary(CancellationTokenSource cancellation, int generation,
+            bool committed, string error)
+        {
+            if (!ReferenceEquals(_summaryCancellation, cancellation)) return;
+            _summaryCancellation = null;
+            try { cancellation.Dispose(); } catch { }
+            _busy = false;
+            SetSendMode(false);
+            if (!WorldLifecycle.IsSameWorld(generation) || _root == null)
+            { _summaryStatusText = null; return; }
+            if (committed)
+            {
+                // 从已保存的梗概和完整原文重建，绝不伪造一条 NPC 发言或普通对话轮。
+                _summaryStatusText = null;
+                NotifyPersistedHistoryChanged();
+                ChatWindow.OnTabDone(this);
+            }
+            else
+            {
+                string message = "（" + (error ?? "总结未完成，原记录仍保留") + "）";
+                if (_summaryStatusText != null) _summaryStatusText.text = message;
+                else AppendSys(message);
+                _summaryStatusText = null;
+            }
+            RequestContactModeRefresh();
+            RestoreInputFocus();
+        }
+
         void OpenTaiwuDirectAction(TaiwuDirectActionKind kind)
         {
             if (_assistantMode || _busy || _combatTransitionBusy || _taiwuId <= 0) return;
@@ -2337,6 +2405,14 @@ namespace JianghuYouling
 
         public void Interrupt()
         {
+            if (_summaryCancellation != null)
+            {
+                var cancellation = _summaryCancellation;
+                try { cancellation.Cancel(); } catch { }
+                FinishConversationSummary(cancellation, _summaryWorldGeneration, false,
+                    "总结已取消，原文和旧梗概仍保留");
+                return;
+            }
             CancelContactModeRefresh();
             CancelPendingSuggestion();
             CancelPendingDictation();
@@ -2468,10 +2544,15 @@ namespace JianghuYouling
             }
         }
 
-        // 控制条:右对齐一行小按钮(删除恒有;重试仅最后一可重试轮)
+        bool IsArchivedRound(Round r)
+            => r != null && r.mode == RMode.Single && r.turns.Count > 0
+                && !TalkOrchestrator.AreTurnsLive(_taiwuId, _npcId, r.turns);
+
+        // 归档轮保留原文、原有图片与语音朗读；写回按钮仅用于仍未压缩的轮次。
         void AddRoundBar(Round r)
         {
             if (_content == null) return;
+            bool archived = IsArchivedRound(r);
             var row = new GameObject("RoundBar", typeof(RectTransform), typeof(HorizontalLayoutGroup));
             row.transform.SetParent(_content, false);
             var hl = row.GetComponent<HorizontalLayoutGroup>();
@@ -2486,21 +2567,24 @@ namespace JianghuYouling
                 NewSmallBtn(row.transform, "语音", out var vb);
                 r.voiceBtn = vb;
                 vb.onClick.AddListener(delegate { GenRoundVoice(r); });
-                if (!r.isAsst && r.replyNpcId >= 0)
+                if (!archived && !r.isAsst && r.replyNpcId >= 0)
                 {
                     NewSmallBtn(row.transform, "生图", out var ib);
                     r.imageBtn = ib;
                     ib.onClick.AddListener(delegate { GenRoundImage(r); });
                 }
             }
-            if (!r.proactive && !string.IsNullOrEmpty(r.playerInput))
+            if (!archived && !r.proactive && !string.IsNullOrEmpty(r.playerInput))
             {
                 var retry = NewSmallBtn(row.transform, "重试", out var rb);
                 rb.onClick.AddListener(delegate { RetryRound(r); });
                 r.retryGo = retry;
             }
-            NewSmallBtn(row.transform, "删除", out var db);
-            db.onClick.AddListener(delegate { DeleteRound(r); });
+            if (!archived)
+            {
+                NewSmallBtn(row.transform, "删除", out var db);
+                db.onClick.AddListener(delegate { DeleteRound(r); });
+            }
 
             r.bar = row;
             r.rows.Add(row);
@@ -2636,6 +2720,8 @@ namespace JianghuYouling
         {
             if (r == null || r.imageGen || r.imagePromptOpen || r.replyNpcId < 0
                 || string.IsNullOrWhiteSpace(r.replyText)) return;
+            if (IsArchivedRound(r))
+            { AppendSys("（这轮对话已总结归档，可阅读和朗读，不再改写原记录）"); return; }
             if (!ImageGenerationConfig.TryResolve(out _, out string imageConfigError))
             {
                 AddBubble(BubbleKind.Sys, "（生图配置尚未就绪："
@@ -2665,6 +2751,8 @@ namespace JianghuYouling
         void BeginRoundImage(Round r, string confirmedPrompt)
         {
             if (r == null || r.imageGen || !_rounds.Contains(r) || Root == null) return;
+            if (IsArchivedRound(r))
+            { AppendSys("（这轮对话已总结归档，可阅读和朗读，不再改写原记录）"); return; }
             if (string.IsNullOrWhiteSpace(confirmedPrompt)
                 || confirmedPrompt.Length > ImageGenerationClient.MaxPromptChars)
             {
@@ -3122,6 +3210,8 @@ namespace JianghuYouling
         bool DeleteRound(Round r)
         {
             if (_busy || r == null) return false;
+            if (IsArchivedRound(r))
+            { AppendSys("（这轮对话已总结归档，可阅读和朗读，不再逐轮删除或重试）"); return false; }
             bool persisted = false;
             try
             {
@@ -3222,6 +3312,30 @@ namespace JianghuYouling
             bool assistantUsable = assistantVisible && !_busy && !_combatTransitionBusy;
             foreach (Button button in _assistantActionButtons)
                 if (button != null) button.interactable = assistantUsable && !_assistantDiagnosticExportBusy;
+            // 总结不是当面行动，千里传音/灵魂单聊同样可用；不挂入赠物按钮的远程禁用集合。
+            bool summaryVisible = !_assistantMode && !_groupMode;
+            if (_summarizeButtonGo != null)
+            {
+                _summarizeButtonGo.SetActive(summaryVisible);
+                float left = _soulMode ? 0f : 324f;
+                Anchor(_summarizeButtonGo.GetComponent<RectTransform>(), Vector2.zero, new Vector2(0, 1),
+                    new Vector2(left, 3), new Vector2(left + 124f, -3));
+            }
+            if (_summarizeButton != null)
+            {
+                _summarizeButton.interactable = summaryVisible && !_busy && !_combatTransitionBusy
+                    && !_requiresProxyBeforeMessage && _taiwuId > 0 && _npcId >= 0;
+                Navigation navigation = _summarizeButton.navigation;
+                navigation.mode = Navigation.Mode.Explicit;
+                navigation.selectOnLeft = usable && _taiwuActionButtons.Count > 0
+                    ? (Selectable)_taiwuActionButtons[_taiwuActionButtons.Count - 1] : _input;
+                navigation.selectOnRight = _input;
+                navigation.selectOnUp = _input;
+                navigation.selectOnDown = _input;
+                _summarizeButton.navigation = navigation;
+            }
+            if (_summarizeLabel != null)
+                _summarizeLabel.text = _summaryCancellation != null ? "总结中…" : "总结对话";
             bool personaVisible = visible && !_assistantMode && !_groupMode && _npcId >= 0;
             bool detailVisible = visible && !_assistantMode && !_groupMode && _npcId >= 0 && !_soulMode;
             if (_detailButtonGo != null) _detailButtonGo.SetActive(detailVisible);
@@ -3232,6 +3346,8 @@ namespace JianghuYouling
                 _personaButton.interactable = personaVisible && !_busy && !_combatTransitionBusy;
             if (_taiwuActionHint != null)
             {
+                float hintLeft = summaryVisible ? (_soulMode ? 132f : 456f) : 324f;
+                _taiwuActionHint.rectTransform.offsetMin = new Vector2(hintLeft, 2);
                 if (_assistantMode)
                     _taiwuActionHint.text = "本地导出 · 固定介绍 · 零 Token";
                 else if (_groupHistoryOnly)
@@ -3309,18 +3425,22 @@ namespace JianghuYouling
             catch { }
         }
 
-        // 开窗载入历史:更早交谈梗概(置顶)+ 逐字历史(按月份插分割线);若上次是本月之前,末尾标"如今"
+        // 展示完整逐字历史（归档 + live），压缩只改变模型上下文，不删减玩家可见记录。
         void RenderHistory()
         {
             string summary = TalkOrchestrator.SummaryOf(_taiwuId, _npcId);
-            var turns = TalkOrchestrator.History(_taiwuId, _npcId);
+            IReadOnlyList<TalkTurn> turns;
+            if (TalkOrchestrator.TryGetCompleteHistory(_taiwuId, _npcId, out var complete, out _))
+                turns = complete;
+            else
+            {
+                turns = TalkOrchestrator.History(_taiwuId, _npcId);
+                AppendSys("（较早的归档记录暂时读取失败，当前显示未压缩记录；原文件未删除，请稍后重开）");
+            }
             bool any = !string.IsNullOrEmpty(summary) || (turns != null && turns.Count > 0);
             if (!any) return;   // 无历史就空着,输入框占位提示已示意可打字
 
-            if (!string.IsNullOrEmpty(summary))
-                AddBubble(BubbleKind.Sys, "此前交谈梗概:" + summary);
-
-            // 把逐字历史按【轮】分组(玩家+回话=一轮;无主之回话=一条主动捎话轮),每轮挂删除/重试控制条
+            // 按原有轮次回放；AddRoundBar 根据是否仍为 live 记录决定哪些操作可用。
             Round cur = null;
             int start = 0;
             void Close()
@@ -3330,10 +3450,22 @@ namespace JianghuYouling
                 AddRoundBar(cur); _rounds.Add(cur); cur = null;
             }
 
+            int summaryIndex = ConversationHistoryLayout.SummaryInsertionIndex(
+                turns, TalkOrchestrator.History(_taiwuId, _npcId));
+            bool summaryRendered = false;
+            void ShowSummary()
+            {
+                if (summaryRendered || string.IsNullOrWhiteSpace(summary)) return;
+                summaryRendered = true;
+                AddBubble(BubbleKind.Sys, "【对话总结 · 累计梗概】\n" + summary);
+            }
+
             int lastMonth = -1, lastTurnMonth = -1;
             if (turns != null)
-                foreach (var t in turns)
+                for (int turnIndex = 0; turnIndex < turns.Count; turnIndex++)
                 {
+                    if (turnIndex == summaryIndex) { Close(); ShowSummary(); }
+                    var t = turns[turnIndex];
                     // 群聊摘要或压缩失败时的完整原文只作为该 NPC 的可压缩上下文保存；玩家仍在群聊页看原始记录，
                     // 单聊窗口不重复展示，也不把多人发言伪装成这个 NPC 的私聊气泡。
                     if (TalkTurnKinds.IsGroupChat(t)) continue;
@@ -3404,11 +3536,14 @@ namespace JianghuYouling
                     if (t.Date > 0) lastTurnMonth = t.Date;
                 }
             Close();
+            ShowSummary(); // 全部消息都已压缩时，累计梗概就在原文之后的聊天底部。
 
             int cur2 = CurrentDate();
             if (lastTurnMonth > 0 && cur2 > 0 && lastTurnMonth < cur2) AddDivider("如今 " + FormatDate(cur2));
             ScrollDown();
             RefreshRoundBars();
+            var host = TalkEntryHost.Instance;
+            if (host != null) host.StartCoroutine(ScrollDownNextFrame());
         }
 
         // 分割线(复用居中系统气泡样式,加破折号)
@@ -3648,7 +3783,11 @@ namespace JianghuYouling
             if (_content == null) return;
             InvalidateCombatOffers();
             for (int i = _content.childCount - 1; i >= 0; i--)
-                Object.Destroy(_content.GetChild(i).gameObject);
+            {
+                var child = _content.GetChild(i);
+                child.SetParent(null, false); // 同帧重建不把待销毁旧行算进布局高度与轮次索引。
+                Object.Destroy(child.gameObject);
+            }
             _rounds.Clear(); _cur = null; _voiceStatusRow = null;
             _streamText = null; _streamRawText = null; _streamBubble = null; _dotsActive = false; _thinkText = null; _thinkBubble = null;
         }
@@ -4141,6 +4280,15 @@ namespace JianghuYouling
                 OpenTaiwuDirectAction(TaiwuDirectActionKind.WriteBook));
             _taiwuActionButtons.Add(writeBookButton);
             _taiwuDirectActionControls.Add(writeBook);
+
+            _summarizeButtonGo = NewButton("SummarizeConversation", _taiwuActionBarGo.transform,
+                "总结对话", 15, out _summarizeButton);
+            // 紧接“写书赠送”，不是吸附整行右边；右侧提示由 RefreshTaiwuActionBar 留出空间。
+            Anchor(_summarizeButtonGo.GetComponent<RectTransform>(), Vector2.zero, new Vector2(0, 1),
+                new Vector2(324, 3), new Vector2(448, -3));
+            StyleTaiwuActionButton(_summarizeButtonGo);
+            _summarizeLabel = _summarizeButtonGo.GetComponentInChildren<TextMeshProUGUI>();
+            _summarizeButton.onClick.AddListener(SummarizeConversation);
 
             GameObject exportLogs = NewButton("AssistantExportLogs", _taiwuActionBarGo.transform,
                 "导出日志", 15, out Button exportLogsButton);
