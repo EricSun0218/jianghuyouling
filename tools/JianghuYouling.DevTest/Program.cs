@@ -50,6 +50,7 @@ namespace JianghuYouling.DevTest
             if (args != null && Array.Exists(args, a => string.Equals(a, "--conversation-summary-only", StringComparison.OrdinalIgnoreCase)))
             {
                 ManualConversationSummaryTests.Run();
+                ConversationHistoryPagingTests.Run();
                 return 0;
             }
             if (args != null && Array.Exists(args, a => string.Equals(a, "--telemetry-only", StringComparison.OrdinalIgnoreCase)))
@@ -331,6 +332,7 @@ namespace JianghuYouling.DevTest
 
             await TelemetryTests.Run();
             ManualConversationSummaryTests.Run();
+            ConversationHistoryPagingTests.Run();
             MonthlyRecoveryTests.Run();
             TestInfluence();
             TestDeadCleanup();

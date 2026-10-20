@@ -94,19 +94,19 @@ namespace JianghuYouling.DevTest
         {
             var archived = Turns("archived", "已压缩原文", "已压缩回话");
             var live = Turns("live", "未压缩新话", "未压缩新回话");
-            var complete = archived.Concat(live).ToList();
-            Check(JianghuYouling.ConversationHistoryLayout.SummaryInsertionIndex(complete, live) == 2,
-                "automatic summary appears after its original messages and before newer live messages");
-            Check(JianghuYouling.ConversationHistoryLayout.SummaryInsertionIndex(complete, new List<TalkTurn>()) == 4,
-                "manual all-turn summary is visible at the bottom, not above all old messages");
-            Check(JianghuYouling.ConversationHistoryLayout.SummaryInsertionIndex(live, live) == 0,
-                "a prior summary with no recoverable source goes before new live turns");
-            Check(JianghuYouling.ConversationHistoryLayout.SummaryInsertionIndex(complete,
-                Turns("live", "另一个快照", "同一稳定标识")) == 2, "display position uses stable turn IDs, not object references");
-            Check(JianghuYouling.ConversationHistoryLayout.SummaryInsertionIndex(complete, complete) == 0,
-                "an uncommitted archive copy does not move the old summary past still-live source messages");
-            Check(JianghuYouling.ConversationHistoryLayout.SummaryInsertionIndex(null, null) == 0,
-                "empty transcript can display a saved summary without a phantom turn");
+            var pager = new ConversationHistoryPager(live, "累计", () => archived.AsEnumerable().Reverse().GetEnumerator());
+            var page = pager.ReadPreviousPage();
+            Check(page.FindIndex(e => e.Summary == "累计") == 2 && page.Count == 5,
+                "automatic summary appears after original messages and before newer live messages");
+            pager = new ConversationHistoryPager(null, "手动累计", () => archived.AsEnumerable().Reverse().GetEnumerator());
+            page = pager.ReadPreviousPage();
+            Check(page.Last().Summary == "手动累计", "all-turn summary follows all archived original messages");
+            pager = new ConversationHistoryPager(live, "旧梗概", () => live.AsEnumerable().Reverse().GetEnumerator());
+            page = pager.ReadPreviousPage();
+            Check(page.Count == 3 && page[0].Summary == "旧梗概", "uncommitted duplicate archive copies do not displace the summary");
+            pager = new ConversationHistoryPager(null, "梗概", null);
+            page = pager.ReadPreviousPage();
+            Check(page.Count == 1 && page[0].Summary == "梗概", "summary-only history has no phantom turn");
         }
 
         // Unity's coroutine/UI surfaces are source-contract checks here, not runtime game tests.
@@ -170,28 +170,25 @@ namespace JianghuYouling.DevTest
                     < ui.IndexOf("_summarizeButtonGo = NewButton(", StringComparison.Ordinal),
                 "button follows the gift/teach/write buttons and is not subject to in-person action gating");
 
-            string history = Section(ui, "void RenderHistory()", "void AddDivider(");
-            Check(history.Contains("TalkOrchestrator.TryGetCompleteHistory(_taiwuId, _npcId, out var complete, out _)")
-                && history.Contains("turns = complete;") && history.Contains("var t = turns[turnIndex];")
+            string history = Section(ui, "void RenderHistory()", "GameObject AddDivider(");
+            Check(history.Contains("TalkOrchestrator.CreateHistoryPager(_taiwuId, _npcId)")
+                && history.Contains("ReadPreviousPage()") && history.Contains("var t = entry.Turn;")
                 && history.Contains("AddBubble(BubbleKind.Player, t.Text)")
                 && history.Contains("AddBubble(BubbleKind.Npc, t.Text)")
                 && history.Contains("AddPersistedExecutionRows(t.Actions, t.ToolResults)")
                 && history.Contains("AddPersistedRoundImage(cur, t.ImageFileName)"),
                 "chat view replays archived and live original messages, actions and existing images after summary or reopen");
-            Check(history.Contains("ConversationHistoryLayout.SummaryInsertionIndex(")
-                && history.Contains("if (turnIndex == summaryIndex) { Close(); ShowSummary(); }")
-                && history.Contains("summaryRendered = true;")
-                && history.Contains("【对话总结 · 累计梗概】")
-                && history.Replace("\r\n", "\n").Contains("Close();\n            ShowSummary();"),
-                "summary is rendered exactly once at the archived/live boundary or after all compressed turns");
-            Check(history.Contains("host.StartCoroutine(ScrollDownNextFrame())"),
+            Check(history.Contains("if (!string.IsNullOrWhiteSpace(entry.Summary))")
+                && history.Contains("【对话总结 · 累计梗概】") && !history.Contains("TryGetCompleteHistory"),
+                "summary comes from the paged boundary, not a complete transcript rebuild");
+            Check(history.Contains("host.StartCoroutine(FinishInitialHistoryLayout("),
                 "summary completion scrolls again after the rebuilt layout settles");
             string clear = Section(ui, "void ClearLog()", "void ScrollDown()");
             int detach = clear.IndexOf("child.SetParent(null, false)", StringComparison.Ordinal);
             Check(detach >= 0 && detach < clear.IndexOf("Object.Destroy(child.gameObject)", StringComparison.Ordinal),
                 "same-frame rebuild excludes old pending-destroy rows from scroll height");
-            Check(history.Contains("turns = TalkOrchestrator.History(_taiwuId, _npcId);")
-                && history.Contains("归档记录暂时读取失败"),
+            Check(history.Contains("entry.Notice") && ReadRepoFile("src/JianghuYouling.Core/Persistence/ConversationHistoryPager.cs")
+                .Contains("归档记录暂时读取失败"),
                 "archive read failure is visible and does not hide the remaining live history");
             string liveHistory = Section(talk, "public static IReadOnlyList<TalkTurn> History(", "internal static bool AreTurnsLive(");
             Check(liveHistory.Contains("GetConv(taiwuId, npcId).Turns")

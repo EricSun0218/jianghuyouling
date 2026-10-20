@@ -106,6 +106,13 @@ namespace JianghuYouling
         string _progressLabel = "思忖";   // 思考行当前进度文字(随工具变)
         string _baseTitle = "";           // 标题正文
         bool _persistedHistoryRefreshPending; // 原生游戏互动在聊天窗外写盘后，闲时重绘当前单聊
+        ConversationHistoryPager _historyPager;
+        Task<List<ConversationHistoryPager.Entry>> _historyPageTask;
+        bool _historyLoading;
+        int _historyViewVersion, _historyScrollVersion;
+        float _lastHistoryScrollY;
+        int _historyLeadingMonth;
+        GameObject _historyLeadingDivider;
         int _proxySourceNpcId;             // 玩家实际点到的固定人物；发送首句时才交给后端建副本
         bool _proxyIdentityChecked;        // 已用当前活人显示数据确认是否需要副本
         bool _proxyIdentityReady;          // 普通人物或已完成副本迁移，可真正发送消息
@@ -215,7 +222,7 @@ namespace JianghuYouling
             _baseTitle = _soulMode ? "与 " + _npcName + " 的灵魂对话" : "与 " + _npcName + " 对话"; ApplyTitle();
             ClearLog();
             _streamText = null; _streamRawText = null; _streamBubble = null; _dotsActive = false; _thinkText = null; _thinkBubble = null;
-            RenderHistory();                       // 开窗即载入历史对话(含月份分割线)
+            RenderHistory();                       // 只载入最近一页，向上滚动再补较早历史
             ClearComposer(true);
 
             // 预热画像:开窗即后台蒸馏,与玩家读招呼/打字并行,藏掉首句的蒸馏延迟
@@ -3425,20 +3432,160 @@ namespace JianghuYouling
             catch { }
         }
 
-        // 展示完整逐字历史（归档 + live），压缩只改变模型上下文，不删减玩家可见记录。
+        // 单聊按页展示归档 + live；压缩仍只改变模型上下文，完整原文留在持久存储。
         void RenderHistory()
         {
-            string summary = TalkOrchestrator.SummaryOf(_taiwuId, _npcId);
-            IReadOnlyList<TalkTurn> turns;
-            if (TalkOrchestrator.TryGetCompleteHistory(_taiwuId, _npcId, out var complete, out _))
-                turns = complete;
+            ReleaseHistoryPager();
+            _historyPager = TalkOrchestrator.CreateHistoryPager(_taiwuId, _npcId);
+            _historyLoading = true;
+            var host = TalkEntryHost.Instance;
+            if (host != null) host.StartCoroutine(FinishInitialHistoryLayout(_historyViewVersion));
             else
             {
-                turns = TalkOrchestrator.History(_taiwuId, _npcId);
-                AppendSys("（较早的归档记录暂时读取失败，当前显示未压缩记录；原文件未删除，请稍后重开）");
+                RenderHistoryPage(_historyPager.ReadPreviousPage(), false);
+                ScrollDown();
+                _historyLoading = false;
             }
-            bool any = !string.IsNullOrEmpty(summary) || (turns != null && turns.Count > 0);
-            if (!any) return;   // 无历史就空着,输入框占位提示已示意可打字
+        }
+
+        Task<List<ConversationHistoryPager.Entry>> ReadHistoryPageAsync()
+        {
+            var pager = _historyPager;
+            // The archive is a validated document, not a seekable record file. Keep its
+            // first parse off Unity's thread; only this page's bubbles/images are built here.
+            _historyPageTask = Task.Run(() => pager.ReadPreviousPage());
+            return _historyPageTask;
+        }
+
+        void ReleaseHistoryPager()
+        {
+            var pager = _historyPager;
+            var pending = _historyPageTask;
+            _historyPager = null;
+            _historyPageTask = null;
+            if (pager == null) return;
+            // A reset must not dispose a cursor while its background page is enumerating.
+            if (pending != null && !pending.IsCompleted)
+                pending.ContinueWith(task =>
+                {
+                    var observed = task.Exception;
+                    pager.Dispose();
+                }, TaskScheduler.Default);
+            else pager.Dispose();
+        }
+
+        IEnumerator FinishInitialHistoryLayout(int version)
+        {
+            var pending = ReadHistoryPageAsync();
+            while (!pending.IsCompleted) yield return null;
+            while (version == _historyViewVersion && _content != null && !RootActive) yield return null;
+            if (version != _historyViewVersion || _content == null)
+            {
+                var observed = pending.Exception;
+                yield break;
+            }
+            _historyPageTask = null;
+            if (pending.IsFaulted || pending.IsCanceled)
+            {
+                var observed = pending.Exception;
+                AddBubble(BubbleKind.Sys, "（聊天记录暂时读取失败，请稍后重开；原文件未删除）");
+                _historyLoading = false;
+                yield break;
+            }
+            // Sending before the background read finishes is allowed. Put the older page
+            // above any newly-created rows and preserve the active round's capture index.
+            RenderHistoryPage(pending.Result, _content.childCount > 0);
+            ScrollDown();
+            yield return null;
+            if (version != _historyViewVersion || _content == null) yield break;
+            ScrollDown();
+            _lastHistoryScrollY = _content.anchoredPosition.y;
+            _historyLoading = false;
+        }
+
+        void OnHistoryScrollChanged(Vector2 unused)
+        {
+            if (_content == null) return;
+            float y = _content.anchoredPosition.y;
+            bool upwards = y < _lastHistoryScrollY - 0.1f;
+            _lastHistoryScrollY = y;
+            if (upwards) RequestOlderHistory();
+        }
+
+        void RequestOlderHistory()
+        {
+            if (_groupMode || _assistantMode || _historyLoading || _historyPager == null
+                || !_historyPager.HasMore || !RootActive || _content == null
+                || _content.anchoredPosition.y > 48f) return;
+            var host = TalkEntryHost.Instance;
+            if (host == null) return;
+            // Defer mutations until after ScrollRect has finished its event/layout callback.
+            _historyLoading = true;
+            host.StartCoroutine(LoadOlderHistory(_historyViewVersion));
+        }
+
+        IEnumerator LoadOlderHistory(int version)
+        {
+            yield return null;
+            if (version != _historyViewVersion || _content == null) yield break;
+            if (!RootActive || _content.anchoredPosition.y > 48f)
+            { _historyLoading = false; yield break; }
+            int scrollVersion = _historyScrollVersion;
+            try
+            {
+                var pending = ReadHistoryPageAsync();
+                while (!pending.IsCompleted) yield return null;
+                while (version == _historyViewVersion && _content != null && !RootActive) yield return null;
+                if (version != _historyViewVersion || _content == null)
+                {
+                    var observed = pending.Exception;
+                    yield break;
+                }
+                _historyPageTask = null;
+                if (pending.IsFaulted || pending.IsCanceled)
+                {
+                    var observed = pending.Exception;
+                    AddBubble(BubbleKind.Sys, "（较早记录暂时读取失败，请稍后重开；原文件未删除）");
+                    yield break;
+                }
+                LayoutRebuilder.ForceRebuildLayoutImmediate(_content);
+                float oldHeight = _content.rect.height;
+                float oldY = _content.anchoredPosition.y;
+                RenderHistoryPage(pending.Result, true);
+                RestoreHistoryPosition(oldHeight, oldY);
+                float restoredY = _content.anchoredPosition.y;
+                // TMP/ContentSizeFitter can settle one frame later. A new reply/send that
+                // intentionally scrolls down takes precedence over this anchor restoration.
+                yield return null;
+                if (version == _historyViewVersion && scrollVersion == _historyScrollVersion
+                    && _content != null && RootActive
+                    && Mathf.Abs(_content.anchoredPosition.y - restoredY) < 0.1f)
+                    RestoreHistoryPosition(oldHeight, oldY);
+            }
+            finally
+            {
+                if (version == _historyViewVersion)
+                {
+                    _historyLoading = false;
+                    if (_content != null) _lastHistoryScrollY = _content.anchoredPosition.y;
+                }
+            }
+        }
+
+        void RestoreHistoryPosition(float oldHeight, float oldY)
+        {
+            LayoutRebuilder.ForceRebuildLayoutImmediate(_content);
+            _scroll.StopMovement();
+            Vector2 position = _content.anchoredPosition;
+            position.y = Mathf.Max(0f, oldY + _content.rect.height - oldHeight);
+            _content.anchoredPosition = position;
+        }
+
+        void RenderHistoryPage(IReadOnlyList<ConversationHistoryPager.Entry> page, bool prepend)
+        {
+            int oldChildCount = _content.childCount, oldRoundCount = _rounds.Count;
+            GameObject leadingDivider = null;
+            int leadingMonth = 0;
 
             // 按原有轮次回放；AddRoundBar 根据是否仍为 live 记录决定哪些操作可用。
             Round cur = null;
@@ -3450,30 +3597,30 @@ namespace JianghuYouling
                 AddRoundBar(cur); _rounds.Add(cur); cur = null;
             }
 
-            int summaryIndex = ConversationHistoryLayout.SummaryInsertionIndex(
-                turns, TalkOrchestrator.History(_taiwuId, _npcId));
-            bool summaryRendered = false;
-            void ShowSummary()
-            {
-                if (summaryRendered || string.IsNullOrWhiteSpace(summary)) return;
-                summaryRendered = true;
-                AddBubble(BubbleKind.Sys, "【对话总结 · 累计梗概】\n" + summary);
-            }
-
             int lastMonth = -1, lastTurnMonth = -1;
-            if (turns != null)
-                for (int turnIndex = 0; turnIndex < turns.Count; turnIndex++)
+            if (page != null)
+                foreach (var entry in page)
                 {
-                    if (turnIndex == summaryIndex) { Close(); ShowSummary(); }
-                    var t = turns[turnIndex];
-                    // 群聊摘要或压缩失败时的完整原文只作为该 NPC 的可压缩上下文保存；玩家仍在群聊页看原始记录，
-                    // 单聊窗口不重复展示，也不把多人发言伪装成这个 NPC 的私聊气泡。
-                    if (TalkTurnKinds.IsGroupChat(t)) continue;
+                    var t = entry.Turn;
+                    if (t == null)
+                    {
+                        Close();
+                        if (!string.IsNullOrWhiteSpace(entry.Summary))
+                            AddBubble(BubbleKind.Sys, "【对话总结 · 累计梗概】\n" + entry.Summary);
+                        if (!string.IsNullOrWhiteSpace(entry.Notice)) AddBubble(BubbleKind.Sys, entry.Notice);
+                        continue;
+                    }
                     bool hasText = t != null && !string.IsNullOrWhiteSpace(t.Text);
                     bool hasExecution = t != null && ((t.ToolResults != null && t.ToolResults.Exists(x => !string.IsNullOrWhiteSpace(x)))
                         || (t.Actions != null && t.Actions.Exists(x => !string.IsNullOrWhiteSpace(x))));
                     if (t == null || (!hasText && !hasExecution)) continue;
-                    if (t.Date > 0 && t.Date != lastMonth) { Close(); AddDivider(FormatDate(t.Date)); lastMonth = t.Date; }
+                    if (t.Date > 0 && t.Date != lastMonth)
+                    {
+                        Close();
+                        var divider = AddDivider(FormatDate(t.Date));
+                        if (leadingDivider == null) { leadingDivider = divider; leadingMonth = t.Date; }
+                        lastMonth = t.Date;
+                    }
                     if (TalkTurnKinds.IsNative(t))
                     {
                         if (cur == null || cur.exchangeId != t.ExchangeId)
@@ -3536,18 +3683,38 @@ namespace JianghuYouling
                     if (t.Date > 0) lastTurnMonth = t.Date;
                 }
             Close();
-            ShowSummary(); // 全部消息都已压缩时，累计梗概就在原文之后的聊天底部。
-
             int cur2 = CurrentDate();
-            if (lastTurnMonth > 0 && cur2 > 0 && lastTurnMonth < cur2) AddDivider("如今 " + FormatDate(cur2));
-            ScrollDown();
+            if (!prepend && lastTurnMonth > 0 && cur2 > 0 && lastTurnMonth < cur2)
+                AddDivider("如今 " + FormatDate(cur2));
+            if (prepend)
+            {
+                // Reuse existing rows/images and prepend only this page. Never rebuild the
+                // already-visible tail or let old rows become part of a streaming new round.
+                var newRows = new List<Transform>();
+                for (int i = oldChildCount; i < _content.childCount; i++) newRows.Add(_content.GetChild(i));
+                int removed = 0;
+                if (lastMonth > 0 && lastMonth == _historyLeadingMonth && _historyLeadingDivider != null)
+                {
+                    _historyLeadingDivider.transform.SetParent(null, false);
+                    Object.Destroy(_historyLeadingDivider);
+                    removed = 1;
+                }
+                for (int i = 0; i < newRows.Count; i++) newRows[i].SetSiblingIndex(i);
+                if (_cur != null) _curStartChild += newRows.Count - removed;
+                var newRounds = _rounds.GetRange(oldRoundCount, _rounds.Count - oldRoundCount);
+                _rounds.RemoveRange(oldRoundCount, newRounds.Count);
+                _rounds.InsertRange(0, newRounds);
+            }
+            if (leadingDivider != null)
+            {
+                _historyLeadingDivider = leadingDivider;
+                _historyLeadingMonth = leadingMonth;
+            }
             RefreshRoundBars();
-            var host = TalkEntryHost.Instance;
-            if (host != null) host.StartCoroutine(ScrollDownNextFrame());
         }
 
         // 分割线(复用居中系统气泡样式,加破折号)
-        void AddDivider(string text) { AddBubble(BubbleKind.Sys, "──────  " + text + "  ──────"); }
+        GameObject AddDivider(string text) { return AddBubble(BubbleKind.Sys, "──────  " + text + "  ──────"); }
 
         string FormatDate(int linearMonth)
         {
@@ -3775,6 +3942,12 @@ namespace JianghuYouling
 
         void ClearLog()
         {
+            _historyViewVersion++;
+            ReleaseHistoryPager();
+            _historyLoading = false;
+            _historyLeadingDivider = null;
+            _historyLeadingMonth = 0;
+            _lastHistoryScrollY = 0f;
             ResetThinkingBuffer();
             // TTS owns work outside the chat coroutine. Cancel/stop it before destroying
             // round controls so clearing a tab cannot leave orphan audio or late callbacks.
@@ -3794,6 +3967,7 @@ namespace JianghuYouling
 
         void ScrollDown()
         {
+            _historyScrollVersion++;
             if (_content != null) LayoutRebuilder.ForceRebuildLayoutImmediate(_content);
             if (_scroll == null || _content == null) return;
             RectTransform viewport = _scroll.viewport != null
@@ -3808,6 +3982,7 @@ namespace JianghuYouling
             Vector2 position = _content.anchoredPosition;
             position.y = hiddenHeight;
             _content.anchoredPosition = position;
+            _lastHistoryScrollY = position.y;
         }
 
         // 等一帧让布局结算(含新加的控制条高度)再滚到底——避免控制条比消息晚一帧入布局、被留在折叠线下需手动下滑
@@ -4223,6 +4398,8 @@ namespace JianghuYouling
             _scroll.content = _content;
             _scroll.verticalScrollbar = UiScroll.AddVerticalForScrollRect(scrollGo);
             _scroll.verticalScrollbarVisibility = ScrollRect.ScrollbarVisibility.Permanent;
+            _scroll.onValueChanged.AddListener(OnHistoryScrollChanged);
+            scrollGo.AddComponent<ChatHistoryScrollListener>().OnScrollUp = RequestOlderHistory;
 
             // 整块输入卡片：太吾行动在第一行，文字区居中，代笔/口述/递话在最底行。
             // 非灵儿页默认比旧版多一行；长文继续向上扩展，两条操作行位置始终固定。

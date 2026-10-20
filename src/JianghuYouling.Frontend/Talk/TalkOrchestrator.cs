@@ -1800,6 +1800,30 @@ namespace JianghuYouling
             }
         }
 
+        internal static ConversationHistoryPager CreateHistoryPager(int taiwuId, int npcId)
+        {
+            lock (ConversationGate)
+            {
+                // Bind the deferred read to this world, even if the user switches saves.
+                string directory = JianghuYoulingPaths.ChatLogs;
+                uint worldId = JianghuYoulingPaths.CurrentWorldId;
+                var conversation = GetConv(taiwuId, npcId);
+                string sourceHash = conversation.SummarySourceHash;
+                bool sourceReliable = conversation.LoadReliable;
+                return new ConversationHistoryPager(History(taiwuId, npcId), conversation.Summary, () =>
+                {
+                    if (!sourceReliable) throw new IOException("Chat history snapshot unavailable.");
+                    if (string.IsNullOrWhiteSpace(sourceHash))
+                        return ((IEnumerable<TalkTurn>)Array.Empty<TalkTurn>()).GetEnumerator();
+                    var archive = ConversationColdArchiveStore.LoadReadOnly(directory, worldId, taiwuId, npcId);
+                    if (!archive.LoadReliable) throw new IOException("Chat archive unavailable.");
+                    // Later automatic summaries may have appended more segments since this
+                    // tab opened. Never prepend those newer messages ahead of this snapshot.
+                    return archive.ReadTurnsNewestFirst(sourceHash).GetEnumerator();
+                });
+            }
+        }
+
         /// <summary>归档原文仍可阅读，但不能通过只支持 live turns 的删除、重试或生图写回接口修改。</summary>
         internal static bool AreTurnsLive(int taiwuId, int npcId, IReadOnlyList<TalkTurn> turns)
         {

@@ -91,6 +91,7 @@ Assert-Contains 'Adventure event target changes cancel stale favor animation' $t
 Assert-Contains 'Talk entry polling avoids redundant native hierarchy rebuilds' $talkEntry 'talk.GetSiblingIndex() == count - 2'
 
 $chatWindow = Read-Source 'src/JianghuYouling.Frontend/UI/ChatWindow.cs'
+$conversationHistoryPager = Read-Source 'src/JianghuYouling.Core/Persistence/ConversationHistoryPager.cs'
 $characterMenuLink = Read-Source 'src/JianghuYouling.Frontend/UI/CharacterMenuLink.cs'
 $npcProactiveScheduler = Read-Source 'src/JianghuYouling.Frontend/Talk/NpcProactiveChatScheduler.cs'
 $npcProactiveStore = Read-Source 'src/JianghuYouling.Frontend/Game/NpcProactiveChatStore.cs'
@@ -332,7 +333,9 @@ Assert-Contains 'Native tooltip renders above the custom chat canvas' $nativeToo
 Assert-NotContains 'Group UI does not expose a separate distillation phase' $groupChatOrchestrator '正在生成中（整理群聊记忆）'
 Assert-NotContains 'Normal group completion never schedules detached distillation' $groupChatOrchestrator 'if (!ConsolidateMemoryOnly(exchangeId))'
 Assert-Before 'Group compression or fallback finishes before final group speaker is revealed' $groupChatOrchestrator 'yield return ConsolidateNewExchangeMemory(exchangeId, ct, turnEpoch,' 'onSpeakerDone?.Invoke(displayName, reply, CloneLine(r.CommittedLine))'
-Assert-Contains 'Single chat UI hides projected group context' $chatWindow 'if (TalkTurnKinds.IsGroupChat(t)) continue;'
+Assert-Contains 'Single chat pager hides projected group context before counting visible messages' $conversationHistoryPager '!TalkTurnKinds.IsGroupChat(turn)'
+Assert-Contains 'Single chat UI uses the filtered paged history' $chatWindow 'TalkOrchestrator.CreateHistoryPager(_taiwuId, _npcId)'
+Assert-Contains 'Single chat paging keeps the agreed batch size' $conversationHistoryPager 'public const int PageSize = 20;'
 Assert-Contains 'Adoptive relations drop native AI-only age favor and existing-child narrative gates' $backend '年龄、好感、是否已有在世父母/子女仅用于本体 AI 自主择亲'
 Assert-NotContains 'Adoptive relation execution no longer enforces the native autonomous-AI age threshold' $backend 'adoptive_age_mismatch'
 Assert-NotContains 'Adoptive relation execution no longer rejects a living biological parent' $backend 'living_parent_exists'
@@ -2621,7 +2624,7 @@ Assert-Contains 'Assistant only retries classified transient service failures' $
 Assert-Contains 'Assistant proactive messages use a compact persona' $assistantOrchestrator 'public static string ProactivePersona()'
 Assert-Contains 'Assistant proactive persona bounds custom persona context' $assistantOrchestrator 'custom.Length > 1200'
 Assert-Contains 'Assistant knowledge base has maintenance reminder' $assistantOrchestrator 'JHYL_ASSISTANT_KB_SYNC'
-Assert-Contains 'Assistant knowledge base has current mod/Taiwu version marker' $assistantOrchestrator 'JHYL_ASSISTANT_KB_VERSION:mod=0.34.0.38,taiwu=1.1.21,buildid=25596993'
+Assert-Contains 'Assistant knowledge base has current mod/Taiwu version marker' $assistantOrchestrator 'JHYL_ASSISTANT_KB_VERSION:mod=0.34.0.39,taiwu=1.1.21,buildid=25596993'
 Assert-Contains 'Assistant knowledge base identifies the shared release baseline' $assistantOrchestrator '测试版与正式版使用同一功能版本'
 Assert-Contains 'Assistant knowledge base describes the historical alias validation fix' $assistantOrchestrator '此前 0.34.0.32 修复历史人物映射误拦已确认副本的问题'
 Assert-Contains 'Assistant knowledge base describes the tutorial proxy crash fix' $assistantOrchestrator '此前 0.34.0.33：修复新手教程中与义父等剧情人物聊天或打开互动记录时后端崩溃的问题'
@@ -2765,7 +2768,7 @@ $frontendProj = Read-Source 'src/JianghuYouling.Frontend/JianghuYouling.Frontend
 Assert-Contains 'Frontend references Unity image conversion module for png jpg loading' $frontendProj 'UnityEngine.ImageConversionModule'
 
 $frontendPlugin = Read-Source 'src/JianghuYouling.Frontend/Plugin.cs'
-Assert-Contains 'Frontend PluginConfig version is 0.34' $frontendPlugin 'PluginConfig("JianghuYouling", "jianghuyouling", "0.34.0.38")'
+Assert-Contains 'Frontend PluginConfig version is 0.34' $frontendPlugin 'PluginConfig("JianghuYouling", "jianghuyouling", "0.34.0.39")'
 Assert-Contains 'Frontend startup log records authoritative target game version' $frontendPlugin 'targetGame=1.1.21 targetBuild=25596993'
 
 $worldLifecycle = Read-Source 'src/JianghuYouling.Frontend/Game/WorldLifecycle.cs'
@@ -3943,7 +3946,7 @@ Assert-Before 'Capture records Taiwu-party disappearance before kidnapping' $bac
 Assert-Before 'Capture writes private life records after authoritative kidnapping' $backend 'DomainManager.Character.AddKidnappedCharacter(context, npcId, targetId, ropeKey);' 'lifeRecords.AddKidnapInPrivate(npcId, currDate, targetId, location'
 Assert-Before 'Capture writes private secret after private life records' $backend 'lifeRecords.AddKidnapInPrivate(npcId, currDate, targetId, location' 'secrets.AddKidnapInPrivate(npcId, targetId);'
 Assert-Contains 'GM mutation outer exceptions are indeterminate' $backend 'gm_mutation_indeterminate'
-Assert-Contains 'Backend PluginConfig version is 0.34' $backend 'PluginConfig("江湖有灵 Backend", "jianghuyouling", "0.34.0.38")'
+Assert-Contains 'Backend PluginConfig version is 0.34' $backend 'PluginConfig("江湖有灵 Backend", "jianghuyouling", "0.34.0.39")'
 Assert-Contains 'Backend item lookup has query aliases' $backend 'ItemQueryAliases'
 Assert-Contains 'Backend item lookup strips natural-language query noise' $backend 'StripItemQueryNoise'
 $itemNameMatcher = Read-Source 'src/Shared/ItemNameMatcher.cs'
@@ -4003,7 +4006,7 @@ Assert-Contains 'Companion monthly dispatches spend-night with the actual actor 
 Assert-Contains 'Monthly events dispatch spend-night with the actual actor and target' $monthlyEvent 'ApplySpendNightBetween(aid, bid, taiwuId'
 
 $configLua = Read-Source 'deploy/Config.lua'
-Assert-Contains 'Config.lua version is 0.34' $configLua 'Version = "0.34.0.38"'
+Assert-Contains 'Config.lua version is 0.34' $configLua 'Version = "0.34.0.39"'
 Assert-Contains 'Config.lua targets the currently audited game version' $configLua 'GameVersion = "1.1.21"'
 Assert-Contains 'Config.lua release heading is current 0.34 version' $configLua '【0.34 当前版本重点】'
 Assert-Contains 'Config.lua release notes mention log analyzer' $configLua '灵儿可直接分析 Player.log'
@@ -4115,9 +4118,9 @@ Assert-NotContains 'Workshop description removes supporter feature voting' $work
 Assert-Contains 'Workshop description ends with the in-game settings entry point' $workshopDescription '设置在游戏内，点击灵儿头像。'
 $workshopDescriptionTest = Read-Source 'docs/workshop-description-test.bbcode.txt'
 $workshopDescriptionFormal = Read-Source 'docs/workshop-description-formal.bbcode.txt'
-Assert-Contains 'Markdown Workshop description carries the current version marker' $workshopDescription '【当前版本】0.34.0.38'
-Assert-Contains 'Test Workshop description carries the current version marker' $workshopDescriptionTest '【当前版本】0.34.0.38'
-Assert-Contains 'Formal Workshop description carries the current version marker' $workshopDescriptionFormal '【当前版本】0.34.0.38'
+Assert-Contains 'Markdown Workshop description carries the current version marker' $workshopDescription '【当前版本】0.34.0.39'
+Assert-Contains 'Test Workshop description carries the current version marker' $workshopDescriptionTest '【当前版本】0.34.0.39'
+Assert-Contains 'Formal Workshop description carries the current version marker' $workshopDescriptionFormal '【当前版本】0.34.0.39'
 if ($workshopDescriptionTest -cne $workshopDescriptionFormal) {
     $failures.Add('Test and formal Workshop descriptions must remain byte-identical')
 }

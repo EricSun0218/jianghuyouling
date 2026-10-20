@@ -191,6 +191,36 @@ namespace JianghuYouling.Core.Persistence
             return result;
         }
 
+        /// <summary>
+        /// Display cursor: index references once, but clone only requested turns. The
+        /// validated on-disk document remains unchanged; export keeps its complete path.
+        /// </summary>
+        public IEnumerable<TalkTurn> ReadTurnsNewestFirst(string throughSourceHash)
+        {
+            // No committed summary means no committed cold prefix in this view.
+            if (string.IsNullOrWhiteSpace(throughSourceHash)) yield break;
+            var ordered = new List<TalkTurn>();
+            lock (Gate(_path))
+            {
+                int lastSegment = _document.Segments.FindIndex(segment =>
+                    string.Equals(segment.SourceHash, throughSourceHash, StringComparison.Ordinal));
+                if (lastSegment < 0) throw new InvalidDataException("Committed chat archive segment unavailable.");
+                var seenIds = new HashSet<string>(StringComparer.Ordinal);
+                for (int segmentIndex = 0; segmentIndex <= lastSegment; segmentIndex++)
+                {
+                    var segment = _document.Segments[segmentIndex];
+                    foreach (var turn in segment.Turns)
+                    {
+                        if (turn == null) continue;
+                        if (!string.IsNullOrWhiteSpace(turn.Id) && !seenIds.Add(turn.Id)) continue;
+                        ordered.Add(turn);
+                    }
+                }
+            }
+            for (int i = ordered.Count - 1; i >= 0; i--)
+                yield return CloneTurn(ordered[i]);
+        }
+
         public static string ComputeSourceHash(string priorSummary, string priorSummarySourceHash,
             IList<TalkTurn> turns)
         {
