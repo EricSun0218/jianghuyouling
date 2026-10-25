@@ -177,8 +177,8 @@ namespace JianghuYouling.BackendContractTests
                     "world-event preflight refuses dangerous actions by restrained actors");
                 RequireContains(companion, "&& state.ActorRestrained)",
                     "companion preflight refuses dangerous actions by restrained actors");
-                RequireContains(companion, "ReadMutationFailureCode(mutationJournalPath, operationId)",
-                    "failed companion traces use the durable error code rather than dialogue text");
+                RequireContains(companion, "ReadMutationFailureCode(operationId)",
+                    "failed companion traces use the typed error code rather than dialogue text");
                 RequireContains(operationRpc, "[JHYL_RPC_OUTCOME] method=",
                     "all RPC methods expose a bounded refusal diagnostic, including travel");
                 RequireContains(talk, "? toolOutcome.Code : null",
@@ -561,12 +561,12 @@ namespace JianghuYouling.BackendContractTests
                 RequireContains(safeChatInput,
                     "TmpWarningsDisabledField.SetValue(tmpSettings, true)",
                     "Jianghu Youling input redraws suppress per-frame missing-glyph stack spam");
-                string rollbackReset = Slice(monthlyEventGenerator,
-                    "if (stale.StartDate >= currentDate)",
-                    "int retainedChapterCount = 0;");
-                RequireContains(rollbackReset,
-                    "Revision = stale.Revision,",
-                    "whole-saga rollback reset advances from the committed revision instead of being rejected as stale");
+                RequireContains(monthlyEventGenerator,
+                    "if (saga.StartDate >= currentDate) return EventSagaStore.Clear(taiwuId);",
+                    "whole-story rollback clears future history through the revision-aware store");
+                RequireContains(monthlyEventGenerator,
+                    "saga.OutcomeJournal.RemoveAll(x => x.WorldDate >= currentDate);",
+                    "partial story rollback removes future facts without replaying old actions");
                 RequireContains(characterAuthority, "list.AddRange(specialGroup);",
                     "native GetGroupSet merges special-group copies into the visible party roster");
                 string delayedProxyMessage = Slice(chatWindow,
@@ -1976,56 +1976,19 @@ namespace JianghuYouling.BackendContractTests
                     "!string.Equals(toolName, \"change_appearance\", StringComparison.Ordinal)",
                     "autonomous monthly surfaces reject appearance changes");
 
-                string reconcile = Slice(companion,
-                    "private static IEnumerator ReconcileCompanionMutationJournal(",
-                    "private static bool IsOperationNotFound(");
-                RequireBefore(reconcile, "yield return RevalidateCompanionRecoveryRoster(entry, generation,",
-                    "EffectHandler.PrepareOperationIdentity(entry.WorldId, entry.TaiwuId, entry.OperationId)",
-                    "current companion roster must be checked before recovery dispatch claim");
-                RequireContains(reconcile, "CancelCompanionRecoveryForRosterChange(path, entry.MutationKey,",
-                    "membership change terminal cancellation");
-                RequireBefore(reconcile,
-                    "EffectHandler.ObserveOperationOutcome(entry.OperationId,",
-                    "yield return RedispatchCompanionEnvelope(entry.ToolName",
-                    "recovery registers the dispatch observer before replay");
-                RequireBefore(reconcile,
-                    "bool recoveryWasDispatched = EffectHandler.WasOperationDispatched(entry.OperationId);",
-                    "CommitCompanionRecoveryDispatchAttempt(path, entry.MutationKey)",
-                    "recovery consumes its one-dispatch budget only after real RPC dispatch");
-                RequireContains(reconcile, "if (!recoveryWasDispatched)",
-                    "pre-dispatch recovery rejection has a separate terminal/retryable path");
-                string rosterCheck = Slice(companion,
-                    "private static IEnumerator RevalidateCompanionRecoveryRoster(",
-                    "private static bool CancelCompanionRecoveryForRosterChange(");
-                RequireContains(rosterCheck, "EffectHandler.QueryNonBabyCompanionGroup(entry.TaiwuId",
-                    "authoritative current non-baby group query");
-                RequireContains(rosterCheck, "!group.Contains(entry.NpcId)",
-                    "current actor companion check");
-                RequireContains(rosterCheck,
-                    "yield return RevalidateMonthlyRecoveryTarget(entry.TargetId, generation, onDone);",
-                    "non-physical recovery revalidates the exact target through the authoritative eligibility query");
-                Require(!rosterCheck.Contains(
-                        "EffectHandler.QueryCharNames(new List<int> { entry.TargetId }",
-                        StringComparison.Ordinal),
-                    "a display name is not sufficient recovery authorization");
-                RequireContains(rosterCheck,
-                    "EffectHandler.QueryTaiwuScenePresence(entry.TaiwuId, endpoints",
-                    "physical recovery uses the unified authoritative Taiwu-scene query");
-                RequireContains(rosterCheck, "var present = new HashSet<int>();",
-                    "physical recovery accepts only ids returned by the scene authority");
-                RequireContains(rosterCheck, "foreach (int endpointId in endpoints)",
-                    "all original endpoints enumerated");
-                RequireContains(rosterCheck, "!present.Contains(endpointId)",
-                    "physical targets must remain in the authoritative Taiwu scene");
-                string rosterCancel = Slice(companion,
-                    "private static bool CancelCompanionRecoveryForRosterChange(",
-                    "private static bool CheckpointCompanionRecoveryDispatch(");
-                RequireContains(rosterCancel, "found.Code = \"RECOVERY_GROUP_MEMBERSHIP_CHANGED\";",
-                    "membership change cancellation code");
-                RequireContains(rosterCancel, "found.Receipt = null;",
-                    "stale unknown receipt cleared on local cancellation");
-                RequireContains(rosterCancel, "found.BackendReceiptStored = false;",
-                    "local cancellation must not become ACK-eligible");
+                Require(!companion.Contains("ReconcileCompanionMutationJournal(", StringComparison.Ordinal)
+                    && !companion.Contains("RedispatchCompanionEnvelope(", StringComparison.Ordinal),
+                    "monthly interruption never restores or redispatches an old companion task");
+                RequireContains(companion, "EffectHandler.PrepareOperationIdentity(worldId, snap.TaiwuId, operationId)",
+                    "current dispatch is bound to the live world and Taiwu");
+                RequireContains(companion, "EffectHandler.QueryNonBabyCompanionGroup(taiwuId",
+                    "current monthly candidates come from the authoritative non-baby group");
+                RequireContains(companion, "if (!IsCompanionKnownEndpoint(scene, snap, resolvedEntityId))",
+                    "unknown targets cannot reach current monthly dispatch");
+                RequireContains(companion, "!IsCompanionPresentEndpoint(scene, snap, resolvedEntityId)",
+                    "physical monthly mutations still require live scene membership");
+                RequireContains(companion, "MonthlyOperationReceipts.Register(operationId, stillCurrent)",
+                    "monthly mutation cancellation travels to the RPC dispatch boundary");
 
                 string publishOutcome = Slice(effects,
                     "private static void PublishOperationOutcome(",

@@ -30,23 +30,20 @@ namespace JianghuYouling
                 int firstInvalidDate = data.CurrDate == int.MaxValue
                     ? int.MaxValue : data.CurrDate + 1;
 
-                // 先关闭任何残留恢复入口，再裁剪回档点之后的投影、事务证据和 NPC 月度记忆。
+                // 裁剪回档点之后的章节、纪事与 NPC 月度记忆，避免把未来事实带回旧时间线。
                 // 各存储方法采用“含边界删除”，所以传入当前月的下一月。
-                bool stateOk = MonthlySettlement.PruneTimelineAtOrAfter(firstInvalidDate);
-                bool companionOk = CompanionMonthlyActions.PruneTimelineAtOrAfter(
-                    data.WorldId, data.TaiwuCharId, firstInvalidDate);
                 bool eventOk = MonthlyEventGenerator.PruneTimelineAtOrAfter(
                     data.TaiwuCharId, firstInvalidDate);
                 bool archiveOk = EventLogStore.PruneAtOrAfter(data.TaiwuCharId, firstInvalidDate);
                 bool memoryOk = PruneMonthlyMemories(data.TaiwuCharId, firstInvalidDate);
                 bool commissionOk = CommissionStore.PruneForRollback(data.TaiwuCharId,
                     data.CurrDate);
-                if (!(stateOk && companionOk && eventOk && archiveOk && memoryOk
+                if (!(eventOk && archiveOk && memoryOk
                     && commissionOk))
                 {
                     Debug.LogWarning("[JHYL_MONTHLY_TIMELINE_PRUNE_INCOMPLETE] world="
                         + data.WorldId + " taiwu=" + data.TaiwuCharId + " boundary="
-                        + data.CurrDate + " state=" + stateOk + " companion=" + companionOk
+                        + data.CurrDate
                         + " event=" + eventOk + " archive=" + archiveOk + " memory=" + memoryOk
                         + " commission=" + commissionOk);
                     return;

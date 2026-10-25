@@ -62,6 +62,7 @@ namespace JianghuYouling
     {
         public static int Generation = 1;
         public static bool HasWorldDate;
+        public static bool HasWorldIdentity => WorldId > 0;
         public static uint WorldId => JianghuYoulingPaths.CurrentWorldId;
         public static bool IsSameWorld(int generation) => generation == Generation;
     }
@@ -78,22 +79,14 @@ namespace JianghuYouling
         public static string Intents => System.IO.Path.Combine(Root, "Intents");
         public static string Personas => System.IO.Path.Combine(Root, "Personas");
         public static string Novels => System.IO.Path.Combine(Root, "Novels");
+        public static string OperationAckOutboxFor(uint worldId)
+            => JianghuYouling.Core.Tools.OperationAckOutboxStore.BuildWorldIsolatedPath(Root, worldId);
     }
 
     public sealed class NpcSnapshot
     {
         public int NpcId, TaiwuId, CurrentDate;
         public string Name, Gender, TaiwuName, TaiwuGender, LocationText;
-    }
-
-    public sealed class CompanionMonthlyResult
-    {
-        public int NpcId;
-        public string Name;
-        public string LocationText;
-        public string Summary;
-        public string Detail;
-        public readonly List<string> Outcomes = new List<string>();
     }
 
     public static class NpcSnapshotReader
@@ -295,6 +288,10 @@ namespace JianghuYouling.Effects
 {
     public static class EffectHandler
     {
+        public static Action<uint, int, string, Action<JianghuYouling.Core.Tools.ToolOutcome>> QueryOperationForTest;
+        public static void QueryOperation(uint worldId, int taiwuId, string operationId,
+            Action<JianghuYouling.Core.Tools.ToolOutcome> done)
+            => QueryOperationForTest(worldId, taiwuId, operationId, done);
         public static Action<IList<int>, Action<List<JianghuYouling.Core.Behavior.CharacterProxyIdentity>, string>>
             QueryCharacterProxyIdentitiesForTest;
         public static Action<int, Action<bool, int, int, bool, bool, int, short, string>>

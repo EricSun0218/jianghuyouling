@@ -19,6 +19,7 @@ namespace JianghuYouling
         public string Detail;                             // 点击详情后按真实落地动作生成的完整故事
         public string Roster;                             // 当事人名册快照(供延迟生成详情)
         public string StopReason;                         // 本月未完成部分被取消时的明确原因
+        public string GenerationFailureReason;            // 仅江湖事件分支失败，不表示同道任务也已停止
         public List<string> Actions = new List<string>(); // 真实落地的动作明细(如「甲将一门武艺传授给乙」)
         public int Heard;                                 // 江湖上约几人风闻
         // 同月总览归档；旧记录没有此字段时按空集合读取。
@@ -32,7 +33,9 @@ namespace JianghuYouling
         public string LocationText;
         public string Summary;
         public string Detail;
+        public string StopReason;
         public List<string> Outcomes = new List<string>();
+        public List<string> ActionTools = new List<string>();
     }
 
     /// <summary>过月「江湖纪事」持久库:每月一条真实发生的事件,按太吾存档分文件存。供历史查看窗只读回放。
@@ -135,17 +138,12 @@ namespace JianghuYouling
             catch (Exception e2) { Debug.LogWarning("[江湖有灵] 纪事幂等提交失败: " + e2.GetType().Name); return false; }
         }
 
-        public static bool EnsureFanoutEntry(int taiwuId, EventFanoutCheckpoint checkpoint)
+        public static bool SaveMonthlyEvent(int taiwuId, MonthlyEventDelivery checkpoint,
+            string generationFailureReason = null)
         {
-            if (taiwuId <= 0 || !EventFanoutPolicy.IsValid(checkpoint)) return false;
+            if (taiwuId <= 0 || checkpoint == null || string.IsNullOrWhiteSpace(checkpoint.EventId)) return false;
             lock (Sync)
             {
-                // The checkpoint flag is not proof that a separately stored archive row still
-                // exists. Reconstruct a missing row from the frozen facts, but never overwrite
-                // an existing row's generated detail, companion digest or stop reason.
-                foreach (EventLogEntry entry in Load(taiwuId))
-                    if (entry != null && string.Equals(entry.EventId, checkpoint.EventId, StringComparison.Ordinal))
-                        return entry.Date == checkpoint.WorldDate;
                 string brief = checkpoint.Actions.Count > 0 && !string.IsNullOrWhiteSpace(checkpoint.Actions[0])
                     ? checkpoint.Actions[0] : checkpoint.StoryText;
                 if (brief.Length > 160) brief = brief.Substring(0, 160) + "…";
@@ -153,6 +151,7 @@ namespace JianghuYouling
                 {
                     EventId = checkpoint.EventId, Date = checkpoint.WorldDate, Area = checkpoint.AreaName,
                     Text = "", Detail = "", Brief = brief, Roster = checkpoint.Roster,
+                    GenerationFailureReason = generationFailureReason,
                     Actions = new List<string>(checkpoint.Actions), Heard = checkpoint.Heard,
                 });
             }
@@ -217,7 +216,9 @@ namespace JianghuYouling
                     // 新版主动行事正文只在玩家点“查看详情”后由后台模型生成。
                     // 过月阶段的确定性投影只作为摘要/事实使用，不能冒充已生成正文。
                     Detail = "",
+                    StopReason = value.StopReason,
                     Outcomes = value.Outcomes == null ? new List<string>() : new List<string>(value.Outcomes),
+                    ActionTools = value.ActionTools == null ? new List<string>() : new List<string>(value.ActionTools),
                 });
             }
             return result;
@@ -238,7 +239,9 @@ namespace JianghuYouling
                     LocationText = value.LocationText ?? "",
                     Summary = value.Summary ?? "",
                     Detail = value.Detail ?? "",
+                    StopReason = value.StopReason,
                     Outcomes = value.Outcomes == null ? new List<string>() : new List<string>(value.Outcomes),
+                    ActionTools = value.ActionTools == null ? new List<string>() : new List<string>(value.ActionTools),
                 });
             }
             return result;
@@ -254,24 +257,6 @@ namespace JianghuYouling
         private static bool IsGuaranteedFallback(string eventId)
             => !string.IsNullOrWhiteSpace(eventId)
                 && eventId.StartsWith("monthly-guaranteed:", StringComparison.Ordinal);
-
-        public static bool TryUpdateHeard(int taiwuId, string eventId, int heard)
-        {
-            if (taiwuId <= 0 || string.IsNullOrWhiteSpace(eventId) || heard < 0) return false;
-            lock (Sync) try
-            {
-                var list = Load(taiwuId);
-                EventLogEntry found = null;
-                foreach (var entry in list)
-                    if (entry != null && string.Equals(entry.EventId, eventId, StringComparison.Ordinal))
-                    { found = entry; break; }
-                if (found == null) return false;
-                if (found.Heard == heard) return true;
-                found.Heard = heard;
-                return SaveAll(taiwuId, list);
-            }
-            catch (Exception e2) { Debug.LogWarning("[江湖有灵] 纪事风闻数更新失败: " + e2.GetType().Name); return false; }
-        }
 
         /// <summary>把整月生成被安全取消的原因持久化；允许与已经落地的部分结果共存。</summary>
         public static bool UpsertMonthlyStopReason(int taiwuId, int date, string reason)
@@ -482,7 +467,7 @@ namespace JianghuYouling
             {
                 if (!(token is JObject item)
                     || !DurableFileStore.HasOnlyProperties(item, "EventId", "Date", "Area", "Text", "Brief", "Detail",
-                        "Roster", "StopReason", "Actions", "Heard", "CompanionActions") || item["Date"]?.Type != JTokenType.Integer
+                        "Roster", "StopReason", "GenerationFailureReason", "Actions", "Heard", "CompanionActions") || item["Date"]?.Type != JTokenType.Integer
                     || (item["Heard"] != null && item["Heard"].Type != JTokenType.Integer)
                     || !DurableFileStore.IsBoundedString(item["EventId"], 256)
                     || !DurableFileStore.IsBoundedString(item["Area"], 1024)
@@ -490,7 +475,8 @@ namespace JianghuYouling
                     || !DurableFileStore.IsBoundedString(item["Brief"], 16384)
                     || !DurableFileStore.IsBoundedString(item["Detail"], 262144)
                     || !DurableFileStore.IsBoundedString(item["Roster"], 32768)
-                    || !DurableFileStore.IsBoundedString(item["StopReason"], 1024)) return false;
+                    || !DurableFileStore.IsBoundedString(item["StopReason"], 1024)
+                    || !DurableFileStore.IsBoundedString(item["GenerationFailureReason"], 1024)) return false;
                 JToken actions = item["Actions"];
                 if (actions != null && actions.Type != JTokenType.Null)
                 {
@@ -505,13 +491,21 @@ namespace JianghuYouling
                     foreach (JToken companion in companionArray)
                     {
                         if (!(companion is JObject value)
-                            || !DurableFileStore.HasOnlyProperties(value, "NpcId", "Name", "LocationText", "Summary", "Detail", "Outcomes")
+                            || !DurableFileStore.HasOnlyProperties(value, "NpcId", "Name", "LocationText", "Summary", "Detail", "StopReason", "Outcomes", "ActionTools")
                             || value["NpcId"]?.Type != JTokenType.Integer
                             || !DurableFileStore.IsBoundedString(value["Name"], 1024)
                             || !DurableFileStore.IsBoundedString(value["LocationText"], 2048)
                             || !DurableFileStore.IsBoundedString(value["Summary"], 16384)
-                            || !DurableFileStore.IsBoundedString(value["Detail"], 131072)) return false;
+                            || !DurableFileStore.IsBoundedString(value["Detail"], 131072)
+                            || !DurableFileStore.IsBoundedString(value["StopReason"], 1024)) return false;
                         JToken outcomes = value["Outcomes"];
+                        JToken tools = value["ActionTools"];
+                        if (tools != null && tools.Type != JTokenType.Null)
+                        {
+                            if (!(tools is JArray toolArray) || toolArray.Count > 256) return false;
+                            foreach (JToken tool in toolArray)
+                                if (!DurableFileStore.IsBoundedString(tool, 128, false)) return false;
+                        }
                         if (outcomes != null && outcomes.Type != JTokenType.Null)
                         {
                             if (!(outcomes is JArray outcomeArray) || outcomeArray.Count > 64) return false;

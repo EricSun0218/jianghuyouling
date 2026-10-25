@@ -15,9 +15,10 @@
     <!-- Compile the production group transcript orchestrator so archive/delete/clear persistence
          paths run for real against temp directories (stubs cover Unity/game/LLM surfaces only). -->
     <Compile Include="..\..\src\JianghuYouling.Frontend\Talk\GroupChatOrchestrator.cs" Link="Production\GroupChatOrchestrator.cs" />
-    <!-- Compile the production saga store so world-identity adoption for legacy (≤v0.29)
-         sagas and the fail-closed durability contracts run for real against temp dirs. -->
+    <!-- Exercise one-shot monthly story storage and receipt-only cleanup against temp files. -->
     <Compile Include="..\..\src\JianghuYouling.Frontend\Game\EventSagaStore.cs" Link="Production\EventSagaStore.cs" />
+    <Compile Include="..\..\src\JianghuYouling.Frontend\Game\MonthlyOperationReceipts.cs" Link="Production\MonthlyOperationReceipts.cs" />
+    <Compile Include="..\..\src\JianghuYouling.Frontend\Game\MonthlyInterruption.cs" Link="Production\MonthlyInterruption.cs" />
     <!-- Compile the production monthly digest archive so companion-first/event-later merging
          and idempotent event upserts run against real durable files. -->
     <Compile Include="..\..\src\JianghuYouling.Frontend\Game\EventLogStore.cs" Link="Production\EventLogStore.cs" />

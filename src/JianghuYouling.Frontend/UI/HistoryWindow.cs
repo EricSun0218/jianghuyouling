@@ -200,11 +200,16 @@ namespace JianghuYouling
                 bool stopped = !string.IsNullOrWhiteSpace(monthProgress?.StopReason)
                     || evs.Exists(entry => entry != null && entry.Date == date
                         && !string.IsNullOrWhiteSpace(entry.StopReason));
+                bool partiallyStopped = evs.Exists(entry => entry != null && entry.Date == date
+                    && (!string.IsNullOrWhiteSpace(entry.GenerationFailureReason)
+                        || entry.CompanionActions != null && entry.CompanionActions.Exists(companion => companion != null
+                            && !string.IsNullOrWhiteSpace(companion.StopReason))));
                 int unread = MonthlyChronicleNoticeStore.UnreadCountForDate(_taiwuId, date);
                 string meta = "\n<size=72%><color=#8a948f>"
                     + (string.IsNullOrWhiteSpace(area) ? "" : area + " · ")
                     + "事件 " + eventCount + " · 主动行事 " + companionCount
-                    + (generating ? " · 生成中" : stopped ? " · 已中止" : "") + "</color>"
+                    + (generating ? " · 生成中" : stopped ? " · 已中止" : "")
+                    + (partiallyStopped ? " · 有中止项" : "") + "</color>"
                     + (unread > 0 ? "<color=#F2C15E> · 未读 " + unread + "</color>" : "")
                     + "</size>";
                 int chosenDate = date;
@@ -228,6 +233,10 @@ namespace JianghuYouling
                 AddInfoCard(_eventDetailContent,
                     "<color=#D7B873><b>本月生成已中止</b></color>\n\n<color=#B8C2BD>"
                     + stopReason + "</color>");
+            if (!string.IsNullOrWhiteSpace(selectedProgress?.RecordWarning))
+                AddInfoCard(_eventDetailContent,
+                    "<color=#D7B873><b>记录保存提示</b></color>\n\n<color=#B8C2BD>"
+                    + selectedProgress.RecordWarning + "</color>");
 
             bool wroteEvent = false;
             foreach (EventLogEntry entry in evs)
@@ -315,6 +324,7 @@ namespace JianghuYouling
             header.GetComponent<LayoutElement>().minHeight = 38f;
 
             string heading = "本月江湖事件" + (string.IsNullOrWhiteSpace(entry.Area) ? "" : " · 【" + entry.Area.Trim() + "】");
+            if (!string.IsNullOrWhiteSpace(entry.GenerationFailureReason)) heading += " · 生成中止";
             var title = NewText("Title", header.transform, 18, TextAlignmentOptions.Left);
             title.text = GlyphSanitizer.Clean("<color=#C7A86B><b>" + heading + "</b></color>");
             title.raycastTarget = false;
@@ -333,6 +343,9 @@ namespace JianghuYouling
             var body = new System.Text.StringBuilder();
             if (!string.IsNullOrWhiteSpace(entry.Brief))
                 body.Append("<color=#C7A86B>事件概要:</color>\n").Append(ReadableParagraphs(entry.Brief));
+            if (!string.IsNullOrWhiteSpace(entry.GenerationFailureReason))
+                body.Append(body.Length > 0 ? "\n\n" : "")
+                    .Append("<color=#D7B873>中止原因：").Append(entry.GenerationFailureReason).Append("</color>");
             if (entry.Actions != null && entry.Actions.Count > 0)
             {
                 body.Append(body.Length > 0 ? "\n\n" : "").Append("<color=#8CC7B8>执行结果:</color>");
@@ -488,7 +501,9 @@ namespace JianghuYouling
             header.GetComponent<LayoutElement>().minHeight = 38f;
 
             var title = NewText("Title", header.transform, 18, TextAlignmentOptions.Left);
-            title.text = GlyphSanitizer.Clean("<color=#C7A86B><b>主动行事 · " + name + "</b></color>");
+            bool stopped = !string.IsNullOrWhiteSpace(companion.StopReason);
+            title.text = GlyphSanitizer.Clean("<color=#C7A86B><b>主动行事 · " + name
+                + (stopped ? " · 已中止" : "") + "</b></color>");
             title.raycastTarget = false;
             var titleLayout = title.gameObject.AddComponent<LayoutElement>();
             titleLayout.flexibleWidth = 1f; titleLayout.minWidth = 180f;
@@ -496,9 +511,11 @@ namespace JianghuYouling
             string detailLabel = generating ? "生成中"
                 : expanded && !string.IsNullOrWhiteSpace(companion.Detail) ? "收起详情"
                 : CompanionDetailErrors.ContainsKey(key) ? "重试详情" : "查看详情";
+            bool canGenerateDetail = !stopped || companion.Outcomes != null && companion.Outcomes.Count > 0;
+            if (!canGenerateDetail) detailLabel = "暂无详情";
             Button detailButton = AddCardButton(header.transform, "Detail", detailLabel, 100f,
                 new Color(0.24f, 0.34f, 0.40f, 0.96f), () => ToggleOrGenerateCompanionDetail(date, companion));
-            detailButton.interactable = !generating;
+            detailButton.interactable = !generating && canGenerateDetail;
 
             AddCardButton(header.transform, "Chat", "去聊聊", 92f, ColTabOn,
                 () => OpenConvoFromList(companion.NpcId, name));
@@ -508,6 +525,9 @@ namespace JianghuYouling
                 body.Append("<size=80%><color=#78847f>所在地点 · ")
                     .Append(GlyphSanitizer.Clean(companion.LocationText.Trim()))
                     .Append("</color></size>");
+            if (stopped)
+                body.Append(body.Length > 0 ? "\n\n" : "")
+                    .Append("<color=#D7B873>中止原因：").Append(companion.StopReason).Append("</color>");
             if (companion.Outcomes != null && companion.Outcomes.Count > 0)
             {
                 if (body.Length > 0) body.Append("\n\n");

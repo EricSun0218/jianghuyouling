@@ -24,7 +24,7 @@ namespace JianghuYouling.TrustBoundaryTests
         public static int Main()
         {
             StoryProjectionIsFailClosed();
-            EventFanoutIsDurableAndIdempotent();
+            EventDeliveryIsCurrentRunOnly();
             MemoryIsUntrustedBoundedData();
             IrreversibleHostileActionsRequireRealAuthority();
             OrdinaryConversationCannotForgeMajorAlertnessEvent();
@@ -531,61 +531,30 @@ namespace JianghuYouling.TrustBoundaryTests
                     new[] { "成功:赠物" }, 10, 1000, allowed, out _));
         }
 
-        private static void EventFanoutIsDurableAndIdempotent()
+        private static void EventDeliveryIsCurrentRunOnly()
         {
             string eventId = "event-fanout-test";
             bool first = EventFanoutPolicy.SelectRecipient(eventId, 101, 0.37);
             AssertEqual("fanout recipient selection is deterministic", first,
                 EventFanoutPolicy.SelectRecipient(eventId, 101, 0.37));
 
-            var checkpoint = new EventFanoutCheckpoint
-            {
-                EventId = eventId,
-                WorldDate = 12,
-                AreaId = 3,
-                AreaName = "太吾村",
-                StoryText = "确定性故事",
-                ProjectionText = "确定性投影",
-                Roster = "甲、乙",
-                Actions = new List<string> { "成功:甲赠物给乙" },
-                OutcomeOperationIds = new List<string> { OperationId.FromStableKey("fanout-op") },
-                RecipientIds = new List<int> { 101, 202 },
-                CompletedRecipientIds = new List<int>(),
-                EventLogCommitted = true,
-            };
-            AssertTrue("prepared fanout checkpoint shape is valid", EventFanoutPolicy.IsValid(checkpoint));
-            checkpoint.EventLogCommitted = false;
-            AssertFalse("recipient cannot commit before EventLog",
-                EventFanoutPolicy.MarkRecipientCommitted(checkpoint, 101));
-            AssertEqual("failed pre-EventLog commit leaves progress untouched", 0,
-                checkpoint.CompletedRecipientIds.Count);
-            checkpoint.EventLogCommitted = true;
+            AssertFalse("fanout excludes missing event identity", EventFanoutPolicy.SelectRecipient(" ", 101, 1));
+            AssertFalse("fanout excludes invalid recipient", EventFanoutPolicy.SelectRecipient(eventId, 0, 1));
+            AssertFalse("fanout rejects NaN probability", EventFanoutPolicy.SelectRecipient(eventId, 101, double.NaN));
+            AssertFalse("zero probability selects nobody", EventFanoutPolicy.SelectRecipient(eventId, 101, 0));
+            AssertTrue("full probability includes valid recipient", EventFanoutPolicy.SelectRecipient(eventId, 101, 1));
 
-            string storyText = checkpoint.StoryText;
-            checkpoint.StoryText = " ";
-            AssertFalse("blank durable story is rejected", EventFanoutPolicy.IsValid(checkpoint));
-            checkpoint.StoryText = storyText;
-            string projectionText = checkpoint.ProjectionText;
-            checkpoint.ProjectionText = null;
-            AssertFalse("missing durable projection is rejected", EventFanoutPolicy.IsValid(checkpoint));
-            checkpoint.ProjectionText = projectionText;
-
-            AssertTrue("first recipient checkpoint commits", EventFanoutPolicy.MarkRecipientCommitted(checkpoint, 101));
-            AssertTrue("same recipient checkpoint is idempotent", EventFanoutPolicy.MarkRecipientCommitted(checkpoint, 101));
-            AssertEqual("idempotent commit does not double-count", 1, checkpoint.CompletedRecipientIds.Count);
-            AssertEqual("restore exposes only pending recipient", 202,
-                EventFanoutPolicy.PendingRecipients(checkpoint)[0]);
-            AssertFalse("projection cannot commit before every recipient and Heard", EventFanoutPolicy.ReadyForProjection(checkpoint));
-            EventFanoutPolicy.MarkRecipientCommitted(checkpoint, 202);
-            checkpoint.FanoutCompleted = true;
-            checkpoint.Heard = 2;
-            checkpoint.HeardCommitted = true;
-            AssertTrue("all recipients plus Heard unlock projection", EventFanoutPolicy.ReadyForProjection(checkpoint));
-            checkpoint.ProjectionCommitted = true;
-            AssertTrue("fully committed checkpoint is valid", EventFanoutPolicy.IsValid(checkpoint));
-
-            checkpoint.CompletedRecipientIds.Add(303);
-            AssertFalse("non-recipient cannot appear in durable progress", EventFanoutPolicy.IsValid(checkpoint));
+            var delivery = new MonthlyEventDelivery { EventId = eventId, WorldDate = 12 };
+            delivery.Actions.Add("成功:甲赠物给乙");
+            delivery.RecipientIds.Add(101);
+            AssertEqual("a planned recipient is not counted as informed", 0, delivery.Heard);
+            var nextRun = new MonthlyEventDelivery { EventId = "next-event", WorldDate = 13 };
+            AssertEqual("a new delivery never inherits previous action results", 0, nextRun.Actions.Count);
+            AssertEqual("a new delivery never resumes previous recipients", 0, nextRun.RecipientIds.Count);
+            foreach (string obsolete in new[] { "CompletedRecipientIds", "EventLogCommitted",
+                "FanoutCompleted", "HeardCommitted", "ProjectionCommitted" })
+                AssertTrue("delivery contains no resumable completion field: " + obsolete,
+                    typeof(MonthlyEventDelivery).GetField(obsolete) == null);
         }
 
         private static void MemoryIsUntrustedBoundedData()

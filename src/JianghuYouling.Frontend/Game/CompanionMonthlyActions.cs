@@ -1,13 +1,11 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
-using System.IO;
 using System.Text;
 using System.Threading;
 using JianghuYouling.Core.Behavior;
 using JianghuYouling.Core.Llm;
 using JianghuYouling.Core.Memory;
-using JianghuYouling.Core.Persistence;
 using JianghuYouling.Core.Prompt;
 using JianghuYouling.Core.Tools;
 using JianghuYouling.Core.Text;
@@ -19,23 +17,6 @@ using UnityEngine;
 
 namespace JianghuYouling
 {
-    public sealed class CompanionMonthlyResult
-    {
-        public int NpcId;
-        public string Name;
-        public string LocationText;
-        public string Summary;
-        public string Detail;
-        public readonly List<string> Outcomes = new List<string>();
-        [JsonIgnore]
-        public readonly List<StoryProjectionReceipt> StoryReceipts = new List<StoryProjectionReceipt>();
-        // This authority set comes from the game-owned companion scene snapshot, never from
-        // StoryReceipts.  Keeping it separate prevents a forged receipt from authorizing its
-        // own actor/target simply by being present in the receipt collection.
-        [JsonIgnore]
-        internal readonly HashSet<int> AuthorizedParticipantIds = new HashSet<int>();
-    }
-
     internal sealed class CompanionPlanStep
     {
         public string Name;
@@ -54,9 +35,6 @@ namespace JianghuYouling
         private const int MaxTrajectoryReasonChars = 240;
         private const int MinimumConfirmedActions = 3;
         private const int MinimumDistinctActionCategories = 2;
-        // Durable journals created by earlier builds may contain step indexes up to 63.
-        // Keep the storage/recovery range compatible even though new network loops stop at 8.
-        private const int MaxJournalStepsPerBatch = 64;
         // 0 means use the user's/model's configured completion ceiling. DeepSeek reasoning and
         // the final tool call share one completion budget; a low feature-specific cap can erase
         // an otherwise valid action with finish_reason=length.
@@ -72,39 +50,26 @@ namespace JianghuYouling
         // 本地后端 RPC 正常应在数帧内回调；永久丢失时不能把全局月度锁留到进程重启。
         // 超时只表示结果未知，不等同失败，更不能自动重试同一副作用。
         private const int MutationCallbackTimeoutSeconds = 30;
-        private const float OperationReconcileWaitSeconds = 8f;
         private const int MonthlyMemoryLimit = 6;
         private const int MonthlyDialogueLimit = 6;
         private const int MonthlyInventoryLimit = 24;
         private const int MonthlySkillLimit = 24;
-        private const int MaxMutationJournalBytes = 8 * 1024 * 1024;
-        private const int MaxMutationJournalEntries = 240;
-        private const int MaxProjectionOutcomes = 96;
         private static bool _running;
         private static int _runEpoch;
         private static readonly object MutationGate = new object();
-        private static readonly Dictionary<int, int> MutationInflightByEpoch = new Dictionary<int, int>();
         private static readonly HashSet<string> UnknownMutationQuarantine = new HashSet<string>(StringComparer.Ordinal);
-        private static bool _guardReleasePending;
-        private static string _guardReleaseReason;
+        private static readonly Dictionary<string, string> OperationFailureCodes = new Dictionary<string, string>(StringComparer.Ordinal);
         // One owner token covers every model request in the active monthly batch.  Unity
         // coroutines stop waiting as soon as the world changes, but without cancelling the
         // provider request the HTTP call would keep consuming quota and the global LLM gate.
         private static CancellationTokenSource _runCancellation;
         private static int _runCancellationEpoch;
-        private static readonly object JournalIo = new object();
+        private static CompanionMonthlyStopState _runStopState;
 
         private sealed class CompanionActionNoveltySnapshot
         {
             internal readonly List<CompanionBehaviorObservation> Observations =
                 new List<CompanionBehaviorObservation>();
-        }
-
-        private enum ProjectionAuthorityState
-        {
-            Current,
-            StaleAfterSaveRollback,
-            Unavailable,
         }
 
         private sealed class CompanionSceneContext
@@ -120,7 +85,7 @@ namespace JianghuYouling
             internal HashSet<int> CompanionIds = new HashSet<int>(); // 本体当前同道；默认随太吾同行
             internal HashSet<int> PresentIds = new HashSet<int>(); // 同道同行语义 + 太吾当前真实同块人物
             internal HashSet<int> RemoteIds = new HashSet<int>(); // 本行动者关系网或按唯一全名解析出的异地人物
-            internal HashSet<int> AuthorizedTargetIds = new HashSet<int>(); // 仅本计划实际引用目标，控制 journal/故事白名单大小
+            internal HashSet<int> AuthorizedTargetIds = new HashSet<int>(); // 本次运行实际引用的目标，独立授权事实记录的人物范围
             internal Dictionary<int, string> Names = new Dictionary<int, string>();
             internal Dictionary<int, string> Genders = new Dictionary<int, string>();
             internal Dictionary<int, string> Locations = new Dictionary<int, string>();
@@ -172,6 +137,14 @@ namespace JianghuYouling
                 if (ActorScene) return true; // 提交前仍由后端按行动者实时 Location 做 race 复核。
                 short area, block;
                 return NpcSnapshotReader.TryGetCurrentWorldArea(out area, out block) && area == AreaId && block == BlockId;
+            }
+
+            internal string InterruptionCode()
+            {
+                if (ActorScene) return null;
+                short area, block;
+                if (!NpcSnapshotReader.TryGetCurrentWorldArea(out area, out block)) return "location_unavailable";
+                return area != AreaId || block != BlockId ? "location_changed" : null;
             }
 
             internal string Render(int actorId)
@@ -312,99 +285,24 @@ namespace JianghuYouling
 
         }
 
-        private sealed class MutationJournalRecord
-        {
-            public string OperationId;
-            public string MutationKey;
-            public string ToolName;
-            public string Status; // prepared | pending | succeeded | failed | rejected | canceled | unknown
-            public string Code;
-            public string Receipt;
-            public bool BackendReceiptStored;
-            public bool AckOutboxCommitted;
-            public bool Retryable;
-            public string Message;
-            public uint WorldId;
-            public int TaiwuId;
-            public int NpcId;
-            public string ActorName;
-            public string ActorLocation;
-            public int TargetId;
-            public string TargetName;
-            public string BatchId;
-            public int StepIndex;
-            public long ConversationClearEpoch;
-            public string DispatchEnvelopeJson;
-            public string DispatchEnvelopeDigest;
-            public int RecoveryDispatchCount;
-            public string OutcomeText;
-            // Frozen from the successful executor callback, independently of ProjectionReceiptsJson.
-            public string ProjectionAsset;
-            public string ProjectionOutcomesJson;
-            // Batch-level snapshot of code-owned typed receipts. Repeated on every journal
-            // entry so a crash before chat projection can still rebuild exact actor/target/asset facts.
-            public string ProjectionReceiptsJson;
-            // Frozen from CompanionSceneContext when the mutation is prepared.  This is the
-            // independent authority set used to revalidate typed receipts after a crash.
-            public string ProjectionParticipantIdsJson;
-            public string ProjectionText;
-            public bool ProjectionCommitted;
-            public int WorldDate;
-            public long UpdatedUtcTicks;
-        }
-
-        private sealed class MutationJournalContext
-        {
-            internal uint WorldId;
-            internal int TaiwuId;
-            internal int NpcId;
-            internal string ActorName;
-            internal string ActorLocation;
-            internal int TargetId;
-            internal string TargetName;
-            internal string BatchId;
-            internal int StepIndex;
-            internal long ConversationClearEpoch;
-            internal string DispatchEnvelopeJson;
-            internal string DispatchEnvelopeDigest;
-            internal string ProjectionParticipantIdsJson;
-        }
-
-        private sealed class MutationAckRequest
-        {
-            internal uint WorldId;
-            internal int TaiwuId;
-            internal string OperationId;
-        }
-
-        private sealed class MutationJournalDocument
-        {
-            public int Version = 8;
-            public long Revision;
-            public List<MutationJournalRecord> Entries = new List<MutationJournalRecord>();
-        }
-
         private sealed class MutationLease
         {
             internal readonly int BatchEpoch;
             internal readonly string ToolName;
             internal readonly string MutationKey;
             internal readonly string OperationId;
-            internal readonly string JournalPath;
-            private int _completionState;   // 0=pending, 1=known callback/dispatch failure, 2=callback timeout (unknown)
+            private int _completionState;
             private string _outcomeStatus;
             private bool _backendReceiptStored;
-            private bool _journalPersisted;
             private readonly object _completionGate = new object();
             private readonly Timer _watchdog;
 
-            internal MutationLease(int batchEpoch, string toolName, string mutationKey, string operationId, string journalPath)
+            internal MutationLease(int batchEpoch, string toolName, string mutationKey, string operationId)
             {
                 BatchEpoch = batchEpoch;
-                ToolName = toolName ?? "unknown";
-                MutationKey = mutationKey ?? "";
-                OperationId = operationId ?? "";
-                JournalPath = journalPath;
+                ToolName = toolName;
+                MutationKey = mutationKey;
+                OperationId = operationId;
                 _watchdog = new Timer(_ => ExpireUnknown(), null,
                     MutationCallbackTimeoutSeconds * 1000, Timeout.Infinite);
             }
@@ -417,59 +315,37 @@ namespace JianghuYouling
                 get
                 {
                     lock (_completionGate)
-                        return _completionState == 1 && _journalPersisted && _backendReceiptStored
-                            && string.Equals(_outcomeStatus, "succeeded", StringComparison.Ordinal);
+                        return _completionState == 1 && _backendReceiptStored
+                            && _outcomeStatus == "succeeded";
                 }
             }
 
             internal void CompleteOutcome(ToolOutcome outcome)
             {
                 bool receiptUnconfirmed;
-                bool persisted;
                 lock (_completionGate)
                 {
                     if (_completionState != 0) return;
-                    try { _watchdog.Dispose(); } catch { }
+                    _watchdog.Dispose();
                     if (outcome == null)
                         outcome = ToolOutcome.Unknown(OperationId, "结构化 operation 回执为空");
-                    if (!string.Equals(outcome.OperationId, OperationId, StringComparison.Ordinal)
+                    if (outcome.OperationId != OperationId
                         || outcome.IsSucceeded && string.IsNullOrWhiteSpace(outcome.Receipt))
-                    {
-                        outcome = new ToolOutcome
-                        {
-                            OperationId = OperationId,
-                            Status = "unknown",
-                            Code = "AUTHORITATIVE_RECEIPT_MISSING_OR_MISMATCHED",
-                            Retryable = true,
-                            Message = "成功回调缺少与当前 operationId 精确绑定的 durable backend receipt",
-                        };
-                    }
-                    _outcomeStatus = string.IsNullOrWhiteSpace(outcome.Status) ? "unknown" : outcome.Status.Trim().ToLowerInvariant();
+                        outcome = ToolOutcome.Unknown(OperationId, "权威回执缺失或操作编号不匹配");
+                    _outcomeStatus = outcome.Status;
                     receiptUnconfirmed = !outcome.IsTerminal;
                     _backendReceiptStored = !string.IsNullOrWhiteSpace(outcome.Receipt);
-                    persisted = UpdateMutationJournal(JournalPath, MutationKey, OperationId, ToolName,
-                        _outcomeStatus,
-                        0, outcome.Code, outcome.Receipt, outcome.Retryable, outcome.Message);
-                    if (!persisted)
-                    {
-                        // 已收到终态但本地 durable journal 未落盘时，绝不能 ACK 或继续依赖动作。
-                        receiptUnconfirmed = true;
-                        UpdateMutationJournal(JournalPath, MutationKey, OperationId, ToolName, "unknown", 0,
-                            "LOCAL_JOURNAL_PERSIST_FAILED", outcome.Receipt, false,
-                            "权威回执已到达，但本地副作用日志无法可靠落盘");
-                    }
-                    _journalPersisted = persisted;
                     _completionState = receiptUnconfirmed ? 2 : 1;
+                    lock (MutationGate)
+                    {
+                        OperationFailureCodes[OperationId] = outcome.Code ?? outcome.Status;
+                        if (receiptUnconfirmed) UnknownMutationQuarantine.Add(MutationKey);
+                    }
                 }
                 EffectHandler.ForgetOperationOutcomeObserver(OperationId);
-                if (receiptUnconfirmed)
-                {
-                    lock (MutationGate)
-                        if (!string.IsNullOrWhiteSpace(MutationKey)) UnknownMutationQuarantine.Add(MutationKey);
-                }
+                EffectHandler.DiscardPreparedOperation(OperationId);
                 if (receiptUnconfirmed && TryInvalidateBatch(BatchEpoch))
                     RequestGuardRelease(BatchEpoch, "operation_receipt_unknown");
-                CompleteMutationLease(BatchEpoch);
             }
 
             internal void CompleteLegacy(bool success, string message)
@@ -485,38 +361,21 @@ namespace JianghuYouling
                 });
             }
 
-            internal bool PersistOutcomeText(string outcomeText, string projectionAsset)
-            {
-                if (string.IsNullOrWhiteSpace(outcomeText)) return false;
-                return UpdateMutationProjectionEvidence(JournalPath, MutationKey, outcomeText.Trim(),
-                    (projectionAsset ?? string.Empty).Trim());
-            }
-
             internal void CompleteDispatchException(Exception exception)
-            {
-                CompleteOutcome(new ToolOutcome
-                {
-                    OperationId = OperationId,
-                    Status = "unknown",
-                    Code = "RPC_DISPATCH_EXCEPTION",
-                    Retryable = true,
-                    Message = "RPC 派发异常:" + (exception == null ? "unknown" : exception.Message),
-                });
-            }
+                => CompleteOutcome(ToolOutcome.Unknown(OperationId,
+                    "RPC 派发异常:" + (exception == null ? "unknown" : exception.Message)));
 
             internal void CancelBeforeDispatch()
             {
                 lock (_completionGate)
                 {
                     if (_completionState != 0) return;
-                    try { _watchdog.Dispose(); } catch { }
-                    UpdateMutationJournal(JournalPath, MutationKey, OperationId, ToolName, "canceled", 0,
-                        "CANCELED_BEFORE_DISPATCH", null, false, "派发前批次已失效");
+                    _watchdog.Dispose();
                     _outcomeStatus = "canceled";
                     _completionState = 1;
                 }
+                EffectHandler.DiscardPreparedOperation(OperationId);
                 EffectHandler.ForgetOperationOutcomeObserver(OperationId);
-                CompleteMutationLease(BatchEpoch);
             }
 
             private void ExpireUnknown()
@@ -524,22 +383,17 @@ namespace JianghuYouling
                 lock (_completionGate)
                 {
                     if (_completionState != 0) return;
-                    try { _watchdog.Dispose(); } catch { }
-                    UpdateMutationJournal(JournalPath, MutationKey, OperationId, ToolName, "unknown", 0,
-                        "CALLBACK_TIMEOUT", null, true, "等待后端回执超时；不会自动重试副作用");
+                    _watchdog.Dispose();
                     _outcomeStatus = "unknown";
                     _completionState = 2;
                 }
                 EffectHandler.ForgetOperationOutcomeObserver(OperationId);
-                lock (MutationGate)
-                    if (!string.IsNullOrWhiteSpace(MutationKey)) UnknownMutationQuarantine.Add(MutationKey);
+                EffectHandler.DiscardPreparedOperation(OperationId);
+                lock (MutationGate) UnknownMutationQuarantine.Add(MutationKey);
                 Debug.LogWarning("[JHYL_COMPANION_MUTATION_UNKNOWN] epoch=" + BatchEpoch
                     + " tool=" + ToolName + " callback_timeout_seconds=" + MutationCallbackTimeoutSeconds
-                    + " outcome=unknown no_retry=true quarantine=true");
-                // 独立 watchdog 必须自行终止整批并请求解锁，不能假设承载 RunMonthly/RunOne
-                // 的 Unity 协程仍有机会运行 finally。其余已派发租约各自回调或超时后，末个租约释放全局锁。
+                    + " no_retry=true");
                 RequestGuardRelease(BatchEpoch, "mutation_unknown");
-                CompleteMutationLease(BatchEpoch);
             }
         }
 
@@ -624,33 +478,28 @@ namespace JianghuYouling
             int plannerConcurrency = Math.Max(1,
                 plannerClient.RecommendedMonthlyPlannerConcurrency);
             int runEpoch;
-            int blockedInflight;
-            if (!TryStartBatch(out runEpoch, out blockedInflight))
+            if (!TryStartBatch(out runEpoch))
             {
-                Debug.Log("[JHYL_COMPANION_MONTHLY_SKIP] running_or_stale_mutation inflight=" + blockedInflight);
+                Debug.Log("[JHYL_COMPANION_MONTHLY_SKIP] current_batch_running=true");
                 onDone?.Invoke(null);
                 yield break;
             }
             float batchStarted = Time.unscaledTime;
             int generation = WorldLifecycle.Generation;
             CancellationToken batchCancellation = GetBatchCancellationToken(runEpoch);
+            CompanionMonthlyStopState stopState;
+            lock (MutationGate) stopState = _runStopState;
             var results = new List<CompanionMonthlyResult>();
+            var selectedResults = new Dictionary<int, CompanionMonthlyResult>();
             int completionState = 0;
             Action<List<CompanionMonthlyResult>> completeOnce = value =>
             {
                 if (Interlocked.Exchange(ref completionState, 1) == 0) onDone?.Invoke(value);
             };
             bool timeoutInvalidated = false;
-            List<CompanionMonthlyResult> timeoutResults = null;
             try
             {
-                bool journalReconciled = false;
-                yield return ReconcileCompanionMutationJournal(generation, taiwuId, ok => journalReconciled = ok);
-                if (!journalReconciled || !BatchIsCurrent(runEpoch, generation))
-                {
-                    Debug.LogWarning("[江湖有灵] 同道副作用 journal 损坏或世界已切换，本批 fail-closed 跳过");
-                    yield break;
-                }
+                MonthlyOperationReceipts.CleanUp();
                 string diag = null;
                 List<int> pool = null;
                 List<int> team = null;
@@ -667,22 +516,30 @@ namespace JianghuYouling
                 }
                 Debug.Log("[JHYL_COMPANION_MONTHLY_POOL_DIAG] " + diag);
 
+                var selected = CompanionMonthlySelectionPolicy.Select(pool, configuredCount,
+                    WorldLifecycle.WorldId, taiwuId, date);
+                foreach (int npc in selected)
+                    selectedResults[npc] = new CompanionMonthlyResult { NpcId = npc, Name = "#" + npc };
                 CompanionSceneContext scene = null;
                 yield return BuildCompanionSceneContext(taiwuId, generation, team, pool, x => scene = x,
                     () => BatchIsCurrent(runEpoch, generation));
-                if (!BatchIsCurrent(runEpoch, generation) || scene == null || !scene.IsCurrent())
+                if (!BatchIsCurrent(runEpoch, generation)) yield break;
+                if (scene == null || !scene.IsCurrent())
                 {
                     Debug.LogWarning("[江湖有灵] 同道主动行事无法建立权威同地场景，本批安全跳过");
+                    foreach (CompanionMonthlyResult pending in selectedResults.Values)
+                        results.Add(MonthlyInterruption.Stop(pending,
+                            MonthlyInterruption.Describe(scene?.InterruptionCode() ?? "location_unavailable")));
                     yield break;
                 }
 
-                var selected = CompanionMonthlySelectionPolicy.Select(pool, configuredCount,
-                    WorldLifecycle.WorldId, taiwuId, date);
+                foreach (int npc in selected)
+                    if (scene.Names.TryGetValue(npc, out string name)) selectedResults[npc].Name = name;
                 Debug.Log("[JHYL_COMPANION_MONTHLY_SELECTION] requested=" + configuredCount
                     + " eligible=" + pool.Count + " selected=" + selected.Count
                     + " ids=[" + string.Join(",", selected) + "]");
                 CompanionActionNoveltySnapshot noveltySnapshot =
-                    BuildCompanionActionNoveltySnapshot(date);
+                    BuildCompanionActionNoveltySnapshot(taiwuId, date);
                 var childDispatcher = new BoundedWorkDispatcher(
                     selected.Count, plannerConcurrency);
                 int[] progressHeartbeat = { 0 };
@@ -706,6 +563,7 @@ namespace JianghuYouling
                     Action<CompanionMonthlyResult> childDone = r =>
                     {
                         heartbeat();
+                        if (Volatile.Read(ref completionState) != 0) return;
                         if (Interlocked.Exchange(ref childCompletion, 1) != 0) return;
                         if (!childDispatcher.CompleteOne()) return;
                         if (r != null && WorldLifecycle.IsSameWorld(generation)) results.Add(r);
@@ -717,9 +575,14 @@ namespace JianghuYouling
                                 selected.Count - Math.Max(0, remaining), selected.Count);
                     };
                     IEnumerator co = RunOne(npc, taiwuId, date, generation, runEpoch, batchCancellation, scene,
-                        executionArbiter, mutationExecutionGate, noveltySnapshot,
+                        executionArbiter, mutationExecutionGate, noveltySnapshot, selectedResults[npc], stopState,
                         childDone, heartbeat);
-                    host.StartCoroutine(RunOneSafely(co, runEpoch, npc, () => childDone(null)));
+                    host.StartCoroutine(RunOneSafely(co, runEpoch, npc, () =>
+                    {
+                        if (Volatile.Read(ref childCompletion) == 0 && Volatile.Read(ref completionState) == 0)
+                            childDone(MonthlyInterruption.Stop(selectedResults[npc],
+                                MonthlyInterruption.Describe(stopState.Code ?? "child_exception")));
+                    }));
                 };
                 Action pumpChildren = () =>
                 {
@@ -769,13 +632,11 @@ namespace JianghuYouling
                     Debug.LogWarning("[江湖有灵] 同道过月主动行事等待超时:剩余 "
                         + childDispatcher.Pending + "/" + selected.Count);
                     // JHYL_COMPANION_MONTHLY_BATCH_EPOCH: timeout invalidates the whole batch
-                    // before finally requests release. Every old wait/RPC/persist gate then
-                    // fails closed; unresolved mutation leases retain _running and block all
-                    // following batches until their callbacks prove the backend work finished.
+                    // before finally releases it. Old continuations stop; unresolved receipts
+                    // are cleanup-only and never hold the next month's scheduling slot.
                     if (Time.unscaledTime >= hard && TryInvalidateBatch(runEpoch))
                     {
                         timeoutInvalidated = true;
-                        timeoutResults = new List<CompanionMonthlyResult>(results);
                         yield break;
                     }
                 }
@@ -783,18 +644,22 @@ namespace JianghuYouling
             }
             finally
             {
+                if (timeoutInvalidated) stopState.Stop("timeout");
+                if (WorldLifecycle.IsSameWorld(generation) && !string.IsNullOrWhiteSpace(stopState.Code))
+                    foreach (CompanionMonthlyResult pending in selectedResults.Values)
+                        if (!results.Exists(value => value.NpcId == pending.NpcId))
+                            results.Add(MonthlyInterruption.Stop(pending, MonthlyInterruption.Describe(stopState.Code)));
                 if (timeoutInvalidated)
                 {
-                    // TryInvalidateBatch above deliberately happens before requesting release.
-                    // The mutation fence keeps _running held while any dispatched backend
-                    // mutation still has no callback, even across world changes.
                     RequestGuardRelease(runEpoch, "timeout");
-                    completeOnce(WorldLifecycle.IsSameWorld(generation) ? (timeoutResults ?? new List<CompanionMonthlyResult>()) : null);
+                    completeOnce(WorldLifecycle.IsSameWorld(generation) ? results : null);
                 }
                 else
                 {
                     bool ownsRun = BatchEpochIsCurrent(runEpoch);
-                    if (ownsRun) RequestGuardRelease(runEpoch, "completed");
+                    if (ownsRun) RequestGuardRelease(runEpoch,
+                        results.Exists(value => !string.IsNullOrWhiteSpace(value.StopReason))
+                            ? "completed_with_interruptions" : "completed");
                     // mutation unknown 会先失效 batch epoch；完成回调不能再依赖 ownsRun，否则外层会等到 600 秒。
                     completeOnce(WorldLifecycle.IsSameWorld(generation) ? results : null);
                 }
@@ -1106,14 +971,36 @@ namespace JianghuYouling
             CompanionSceneContext scene, CompanionExecutionArbiter executionArbiter,
             Func<int, IReadOnlyCollection<int>, bool> mutationExecutionGate,
             CompanionActionNoveltySnapshot noveltySnapshot,
+            CompanionMonthlyResult result, CompanionMonthlyStopState stopState,
             Action<CompanionMonthlyResult> onDone, Action heartbeat)
         {
             heartbeat?.Invoke();
+            long conversationClearEpoch = TalkOrchestrator.CaptureConversationClearEpoch(taiwuId, npcId);
+            Action<CompanionMonthlyResult> report = onDone;
+            onDone = value =>
+            {
+                // A canceled wait must still deliver its reason and already confirmed receipts.
+                // Never project into a different/reloaded world, or recreate cleared chat history.
+                if (value == null && WorldLifecycle.IsSameWorld(generation))
+                {
+                    string code = TalkOrchestrator.CaptureConversationClearEpoch(taiwuId, npcId) != conversationClearEpoch
+                        ? "conversation_cleared" : stopState.Code;
+                    if (code == null && MonthlySettlement.IsAdvancingMonthForMonthlyWork()) code = "native_month_advance";
+                    if (code == null) code = scene?.InterruptionCode();
+                    if (code == null && (batchCancellation.IsCancellationRequested || !BatchIsCurrent(batchEpoch, generation)))
+                        code = "batch_invalidated";
+                    if (code != null)
+                    {
+                        value = MonthlyInterruption.Stop(result, MonthlyInterruption.Describe(code));
+                        Debug.Log("[JHYL_COMPANION_INTERRUPTED] npc=" + npcId + " reason=" + code);
+                    }
+                }
+                report(value);
+            };
             if (batchCancellation.IsCancellationRequested || !BatchIsCurrent(batchEpoch, generation)
                 || scene == null || !scene.MemberIds.Contains(npcId) || !scene.IsCurrent())
             { onDone(null); yield break; }
             scene = scene.Clone();
-            long conversationClearEpoch = TalkOrchestrator.CaptureConversationClearEpoch(taiwuId, npcId);
             string batchId = OperationId.FromStableKey("companion-batch|" + WorldLifecycle.WorldId + "|"
                 + taiwuId + "|" + npcId + "|" + date);
             Func<bool> current = () => !batchCancellation.IsCancellationRequested
@@ -1123,36 +1010,6 @@ namespace JianghuYouling
             var traceRoot = new LlmTraceContext(batchId,
                 "companion:" + WorldLifecycle.WorldId + ":" + taiwuId + ":" + npcId, batchId);
             float oneStarted = Time.unscaledTime;
-            var result = new CompanionMonthlyResult { NpcId = npcId, Name = "#" + npcId };
-            string mutationJournalPath = MutationJournalPath(WorldLifecycle.WorldId);
-            if (TryLoadProjectedCompanionBatch(mutationJournalPath, batchId,
-                out CompanionMonthlyResult alreadyProjected))
-            {
-                ProjectionAuthorityState projectionAuthority = ProjectionAuthorityState.Current;
-                yield return ValidateProjectedCompanionBatchAuthority(mutationJournalPath, batchId,
-                    generation, current, value => projectionAuthority = value);
-                if (projectionAuthority == ProjectionAuthorityState.Current)
-                {
-                    onDone(alreadyProjected);
-                    yield break;
-                }
-                if (projectionAuthority == ProjectionAuthorityState.Unavailable)
-                {
-                    Debug.LogWarning("[JHYL_COMPANION_PROJECTION_RESTORE_PAUSED] batch=" + batchId
-                        + " reason=current_save_receipt_unavailable");
-                    onDone(null);
-                    yield break;
-                }
-                if (!InvalidateStaleProjectedCompanionBatch(mutationJournalPath, batchId, date))
-                {
-                    Debug.LogWarning("[JHYL_COMPANION_STALE_PROJECTION_RESET_FAILED] batch=" + batchId);
-                    onDone(null);
-                    yield break;
-                }
-                Debug.LogWarning("[JHYL_COMPANION_STALE_PROJECTION_RESET] batch=" + batchId
-                    + " reason=backend_operation_missing_in_current_save regenerate=true");
-            }
-
             NpcSnapshot snap = null;
             float preloadStarted = Time.unscaledTime;
             yield return NpcSnapshotReader.Fetch(npcId, value => snap = value, false, current);
@@ -1355,6 +1212,7 @@ namespace JianghuYouling
                 }
                 if (turn == null || !turn.Ok)
                 {
+                    result.StopReason = MonthlyInterruption.ModelFailure(turn?.Error, ElapsedMs(llmStarted), ActionDecisionTimeoutSeconds);
                     if (anyAttempt)
                     {
                         result.Outcomes.Add("失败:同道主动行事 Agent 中途请求失败，原因:"
@@ -1536,15 +1394,6 @@ namespace JianghuYouling
                         continue;
                     }
                     PopulateAuthorizedParticipants(result.AuthorizedParticipantIds, snap, scene);
-                    if (!ExpandBatchProjectionAuthority(MutationJournalPath(WorldLifecycle.WorldId),
-                        batchId, snap, scene))
-                    {
-                        messages.Add(LlmMessage.Tool(call.Id,
-                            "未执行：本批人物授权无法可靠扩展，后续动作已停止。"));
-                        finalNarrative = DeterministicStory(result, null);
-                        break;
-                    }
-
                     if (worldMutation)
                     {
                         bool externalGateValid = true;
@@ -1606,7 +1455,7 @@ namespace JianghuYouling
                             : ToolResultSucceeded(toolResult) ? "succeeded" : "rejected", operationId,
                         notExecuted ? SanitizeTrajectoryReason(toolResult)
                             : ToolResultSucceeded(toolResult) ? null
-                            : ReadMutationFailureCode(mutationJournalPath, operationId));
+                            : ReadMutationFailureCode(operationId));
                     if (notExecuted)
                     {
                         messages.Add(LlmMessage.Tool(call.Id, (toolResult ?? "未执行：前置条件不满足")
@@ -1616,18 +1465,7 @@ namespace JianghuYouling
                     if (ToolResultUnknown(toolResult))
                     {
                         result.Summary = "主动行事回执未知，已停止后续行动";
-                        result.Detail = DeterministicStory(result, null);
-                        FinalizeCompanionBatchProjection(taiwuId, npcId, date, result, batchId,
-                            generation, conversationClearEpoch);
-                        onDone(result);
-                        yield break;
-                    }
-                    if (!current()) { onDone(null); yield break; }
-                    if (!CheckpointCompanionBatchOutcomes(MutationJournalPath(WorldLifecycle.WorldId),
-                        batchId, result.Outcomes, result.StoryReceipts))
-                    {
-                        result.Outcomes.Add("未知:完整批次结果 checkpoint 失败；已停止后续行动");
-                        result.Summary = "主动行事投影 checkpoint 失败";
+                        result.StopReason = MonthlyInterruption.Describe("operation_receipt_unknown");
                         result.Detail = DeterministicStory(result, null);
                         FinalizeCompanionBatchProjection(taiwuId, npcId, date, result, batchId,
                             generation, conversationClearEpoch);
@@ -1637,6 +1475,7 @@ namespace JianghuYouling
                     if (ToolResultSucceeded(toolResult) && call.Name != "no_action"
                         && call.Name != "remember" && !readOnlyQuery)
                     {
+                        result.ActionTools.Add(NormalizePlanToolName(call.Name));
                         roundHasSuccessfulActionReceipt = true;
                         // 只使真正受本次动作影响的查询域失效。赠物、换装、传授等不会让
                         // 已查询的人际关系凭空过期；保留它们可避免后续每一步重新查人。
@@ -1651,6 +1490,7 @@ namespace JianghuYouling
                                 completionState.Categories, StringComparer.Ordinal);
                         }
                     }
+                    if (!current()) { onDone(null); yield break; }
                     if (MinimumCompanionActionDiversityMet(confirmedActionCount,
                         confirmedActionCategories))
                     {
@@ -1659,7 +1499,7 @@ namespace JianghuYouling
                         // informed stop decision; another empty review request adds no evidence.
                         completionState.MarkCausalReviewInstructionDelivered();
                     }
-                    // Typed receipts stay in the durable journal and UI projection. Repeating
+                    // Typed receipts stay in the current result and UI projection. Repeating
                     // their verbose manifest in every later prompt only grows token cost.
                     string modelReceipt = toolResult ?? "未成:工具没有返回结果";
                     messages.Add(LlmMessage.Tool(call.Id, modelReceipt
@@ -1739,34 +1579,22 @@ namespace JianghuYouling
             => CompanionBehaviorPriorityPolicy.CategoryOf(
                 NormalizePlanToolName(toolName));
 
-        private static CompanionActionNoveltySnapshot BuildCompanionActionNoveltySnapshot(int date)
+        private static CompanionActionNoveltySnapshot BuildCompanionActionNoveltySnapshot(int taiwuId, int date)
         {
             var snapshot = new CompanionActionNoveltySnapshot();
-            try
+            foreach (EventLogEntry month in EventLogStore.Load(taiwuId))
             {
-                MutationJournalDocument journal;
-                lock (JournalIo)
-                    journal = LoadMutationJournal(MutationJournalPath(WorldLifecycle.WorldId));
-                if (journal?.Entries == null) return snapshot;
-                foreach (MutationJournalRecord entry in journal.Entries)
+                if (month == null || month.Date >= date
+                    || month.Date < date - CompanionBehaviorPriorityPolicy.LookbackMonths
+                    || month.CompanionActions == null) continue;
+                foreach (CompanionMonthlyLogEntry actor in month.CompanionActions)
                 {
-                    if (entry == null || entry.WorldDate >= date
-                        || entry.WorldDate < Math.Max(0,
-                            date - CompanionBehaviorPriorityPolicy.LookbackMonths)
-                        || !string.Equals(entry.Status, "succeeded", StringComparison.Ordinal))
-                        continue;
-                    string tool = NormalizePlanToolName(entry.ToolName);
-                    if (string.IsNullOrWhiteSpace(tool) || IsCompanionQueryTool(tool)
-                        || tool == "no_action" || tool == "remember")
-                        continue;
-                    snapshot.Observations.Add(new CompanionBehaviorObservation
-                    {
-                        ToolName = tool,
-                        MonthsAgo = Math.Max(1, date - entry.WorldDate),
-                    });
+                    if (actor?.ActionTools == null) continue;
+                    foreach (string tool in actor.ActionTools)
+                        snapshot.Observations.Add(new CompanionBehaviorObservation
+                        { ToolName = tool, MonthsAgo = date - month.Date });
                 }
             }
-            catch { }
             return snapshot;
         }
 
@@ -2002,23 +1830,22 @@ namespace JianghuYouling
         public static bool HasOutstandingDialogueActionIntent(IReadOnlyList<JianghuYouling.Core.Prompt.TalkTurn> turns)
             => CompanionMonthlyActivationPolicy.HasOutstandingDialogueActionIntent(turns, MonthlyDialogueLimit);
 
-        private static bool TryStartBatch(out int batchEpoch, out int blockedInflight)
+        private static bool TryStartBatch(out int batchEpoch)
         {
             lock (MutationGate)
             {
-                blockedInflight = TotalInflightUnsafe();
-                if (_running || blockedInflight > 0)
+                if (_running)
                 {
                     batchEpoch = _runEpoch;
                     return false;
                 }
                 _running = true;
-                _guardReleasePending = false;
-                _guardReleaseReason = null;
+                UnknownMutationQuarantine.Clear();
+                OperationFailureCodes.Clear();
                 batchEpoch = unchecked(++_runEpoch);
-                try { _runCancellation?.Dispose(); } catch { }
                 _runCancellation = new CancellationTokenSource();
                 _runCancellationEpoch = batchEpoch;
+                _runStopState = new CompanionMonthlyStopState();
                 return true;
             }
         }
@@ -2038,19 +1865,6 @@ namespace JianghuYouling
                     cancellation = _runCancellation;
             try { cancellation?.Cancel(); }
             catch (ObjectDisposedException) { }
-        }
-
-        private static void DisposeBatchRequests(int batchEpoch)
-        {
-            CancellationTokenSource cancellation = null;
-            lock (MutationGate)
-            {
-                if (_runCancellation == null || _runCancellationEpoch != batchEpoch) return;
-                cancellation = _runCancellation;
-                _runCancellation = null;
-                _runCancellationEpoch = 0;
-            }
-            try { cancellation.Dispose(); } catch { }
         }
 
         private static bool BatchEpochIsCurrent(int batchEpoch)
@@ -2075,53 +1889,20 @@ namespace JianghuYouling
         }
 
         private static MutationLease TryBeginMutationLease(int batchEpoch, Func<bool> stillCurrent,
-            string toolName, string mutationKey, string operationId, string journalPath, int worldDate,
-            out bool quarantined, out string refusal, MutationJournalContext context)
+            string toolName, string mutationKey, string operationId, out bool quarantined)
         {
             quarantined = false;
-            refusal = null;
             if (!PredicateIsCurrent(stillCurrent)) return null;
-            if (MutationJournalBlocks(journalPath, mutationKey))
-            {
-                quarantined = true;
-                return null;
-            }
-            if (!UpdateMutationJournal(journalPath, mutationKey, operationId, toolName, "prepared", worldDate,
-                context: context))
-            {
-                refusal = "本地副作用日志 checkpoint 失败";
-                return null;
-            }
             MutationLease lease;
             lock (MutationGate)
             {
-                if (!_running || batchEpoch != _runEpoch)
-                {
-                    refusal = "批次已失效";
-                    lease = null;
-                }
-                else
-                {
-                if (!string.IsNullOrWhiteSpace(mutationKey) && UnknownMutationQuarantine.Contains(mutationKey))
+                if (!_running || batchEpoch != _runEpoch) return null;
+                if (UnknownMutationQuarantine.Contains(mutationKey))
                 {
                     quarantined = true;
-                    lease = null;
+                    return null;
                 }
-                    else
-                    {
-                        int count;
-                        MutationInflightByEpoch.TryGetValue(batchEpoch, out count);
-                        MutationInflightByEpoch[batchEpoch] = count + 1;
-                        lease = new MutationLease(batchEpoch, toolName, mutationKey, operationId, journalPath);
-                    }
-                }
-            }
-            if (lease == null)
-            {
-                if (!quarantined) UpdateMutationJournal(journalPath, mutationKey, operationId, toolName,
-                    "canceled", worldDate, "CANCELED_BEFORE_DISPATCH", null, false,
-                    "批次在 RPC 派发前失效");
-                return null;
+                lease = new MutationLease(batchEpoch, toolName, mutationKey, operationId);
             }
             if (PredicateIsCurrent(stillCurrent)) return lease;
             lease.CancelBeforeDispatch();
@@ -2131,8 +1912,7 @@ namespace JianghuYouling
         private static MutationLease TryBeginToolMutationLease(int batchEpoch, Func<bool> stillCurrent,
             NpcSnapshot snap, CompanionSceneContext scene, string toolName, JObject args,
             string resolvedEntityField, int resolvedEntityId,
-            List<string> outcomes, Action<string> onResult, string batchId, int stepIndex,
-            long conversationClearEpoch, Action<string> onOperationPrepared)
+            List<string> outcomes, Action<string> onResult, Action<string> onOperationPrepared)
         {
             string normalizedTool = NormalizePlanToolName(toolName);
             if (!IsCompanionKnownEndpoint(scene, snap, resolvedEntityId))
@@ -2173,11 +1953,11 @@ namespace JianghuYouling
                 + "|" + (snap == null ? 0 : snap.TaiwuId)
                 + "|" + (snap == null ? 0 : snap.NpcId)
                 + "|date=" + (snap == null ? 0 : snap.CurrentDate)
+                + "|run=" + WorldLifecycle.Generation + ":" + batchEpoch
                 + "|" + NormalizePlanToolName(toolName)
                 + "|" + CanonicalizePlanArgs(toolName,
                     keyArgs.ToString(Newtonsoft.Json.Formatting.None), snap);
             uint worldId = WorldLifecycle.WorldId;
-            string journalPath = MutationJournalPath(worldId);
             string envelope = BuildCompanionDispatchEnvelope(toolName, snap, scene, keyArgs,
                 resolvedEntityField, resolvedEntityId);
             if (string.IsNullOrWhiteSpace(envelope))
@@ -2195,28 +1975,11 @@ namespace JianghuYouling
                 onResult?.Invoke("未执行：" + reason);
                 return null;
             }
-            var context = new MutationJournalContext
-            {
-                WorldId = worldId,
-                TaiwuId = snap == null ? 0 : snap.TaiwuId,
-                NpcId = snap == null ? 0 : snap.NpcId,
-                ActorName = snap == null ? null : (string.IsNullOrWhiteSpace(snap.Name) ? ("#" + snap.NpcId) : snap.Name),
-                ActorLocation = snap == null ? null : snap.LocationText,
-                TargetId = resolvedEntityId,
-                TargetName = CompanionSceneEndpointName(scene, snap, resolvedEntityId),
-                BatchId = batchId,
-                StepIndex = stepIndex,
-                ConversationClearEpoch = conversationClearEpoch,
-                DispatchEnvelopeJson = envelope,
-                DispatchEnvelopeDigest = envelopeDigest,
-                ProjectionParticipantIdsJson = SerializeAuthorizedParticipantIds(snap, scene),
-            };
-            bool quarantined; string refusal;
-            var lease = TryBeginMutationLease(batchEpoch, stillCurrent, toolName, key, operationId, journalPath,
-                snap == null ? 0 : snap.CurrentDate, out quarantined, out refusal, context);
+            var lease = TryBeginMutationLease(batchEpoch, stillCurrent, toolName, key, operationId,
+                out bool quarantined);
             if (lease != null)
             {
-                if (!EffectHandler.PrepareOperationIdentity(context.WorldId, context.TaiwuId, operationId))
+                if (!EffectHandler.PrepareOperationIdentity(worldId, snap.TaiwuId, operationId))
                 {
                     lease.CancelBeforeDispatch();
                     const string identityFailure = "动作准备后存档或太吾身份已变化，已取消派发";
@@ -2240,6 +2003,7 @@ namespace JianghuYouling
                 }
                 if (EffectHandler.ObserveOperationOutcome(operationId, lease.CompleteOutcome))
                 {
+                    MonthlyOperationReceipts.Register(operationId, stillCurrent);
                     onOperationPrepared?.Invoke(operationId);
                     return lease;
                 }
@@ -2251,10 +2015,10 @@ namespace JianghuYouling
             }
             if (quarantined)
                 ReportMutationUnknown(outcomes, toolName,
-                    "此前同一操作的后端结果未知，为避免重复副作用，跨重启均不再自动派发(operationId=" + operationId + ")", onResult);
+                    "本批此前同一操作的后端结果未知，不再自动派发(operationId=" + operationId + ")", onResult);
             else
             {
-                string reason = refusal ?? "批次已失效";
+                string reason = "批次已失效";
                 onResult?.Invoke("未执行：" + reason);
             }
             return null;
@@ -2361,1640 +2125,6 @@ namespace JianghuYouling
                     if (id > 0) destination.Add(id);
         }
 
-        private static string SerializeAuthorizedParticipantIds(NpcSnapshot snap, CompanionSceneContext scene)
-        {
-            var ids = new SortedSet<int>();
-            PopulateAuthorizedParticipants(ids, snap, scene);
-            return JsonConvert.SerializeObject(ids, Formatting.None);
-        }
-
-        private static string MutationJournalPath(uint worldId)
-            => Path.Combine(JianghuYoulingPaths.Events, "companion_mutation_journal_" + (worldId > 0 ? worldId.ToString() : "pending") + ".json");
-
-        internal static bool PruneTimelineAtOrAfter(uint worldId, int taiwuId, int currentDate)
-        {
-            if (worldId == 0 || taiwuId <= 0 || currentDate < 0) return false;
-            string path = MutationJournalPath(worldId);
-            lock (JournalIo)
-            {
-                MutationJournalDocument doc = LoadMutationJournal(path);
-                if (doc == null || doc.Entries == null) return false;
-                int removed = doc.Entries.RemoveAll(entry => entry != null
-                    && entry.WorldId == worldId && entry.TaiwuId == taiwuId
-                    && entry.WorldDate >= currentDate);
-                if (removed == 0) return true;
-                doc.Revision++;
-                bool saved = SaveMutationJournalDocument(path, doc);
-                if (saved) Debug.Log("[JHYL_MONTHLY_TIMELINE_PRUNED] companion_journal removed="
-                    + removed + " boundary=" + currentDate);
-                return saved;
-            }
-        }
-
-        private static bool MutationJournalBlocks(string path, string mutationKey)
-        {
-            if (string.IsNullOrWhiteSpace(path) || string.IsNullOrWhiteSpace(mutationKey)) return true;
-            lock (JournalIo)
-            {
-                var doc = LoadMutationJournal(path);
-                if (doc == null) return File.Exists(path) || File.Exists(path + ".tmp") || File.Exists(path + ".bak"); // 存在但无法恢复时 fail closed
-                foreach (var entry in doc.Entries)
-                    if (entry != null && entry.MutationKey == mutationKey
-                        && (entry.Status == "prepared" || entry.Status == "pending"
-                            || entry.Status == "unknown" && entry.Retryable))
-                        return true;
-                return false;
-            }
-        }
-
-        private static bool UpdateMutationJournal(string path, string mutationKey, string operationId,
-            string toolName, string status, int worldDate, string code = null, string receipt = null,
-            bool? retryable = null, string message = null, MutationJournalContext context = null)
-        {
-            if (string.IsNullOrWhiteSpace(path) || string.IsNullOrWhiteSpace(mutationKey)) return false;
-            lock (JournalIo)
-            {
-                try
-                {
-                    var doc = LoadMutationJournal(path);
-                    // 任何候选文件存在却都无法解析时都必须 fail-closed。尤其 watchdog/迟到回调可能在
-                    // Unity 主流程之外到达，不能让它用当前这一条记录覆盖并遗失别的未决 operation。
-                    if (doc == null)
-                    {
-                        if (File.Exists(path) || File.Exists(path + ".tmp") || File.Exists(path + ".bak"))
-                        {
-                            Debug.LogWarning("[江湖有灵] 同道副作用日志已损坏，拒绝以局部回调覆盖:" + path);
-                            return false;
-                        }
-                        doc = new MutationJournalDocument();
-                    }
-                    MutationJournalRecord found = null;
-                    foreach (var entry in doc.Entries)
-                        if (entry != null && entry.MutationKey == mutationKey) { found = entry; break; }
-                    if (found == null)
-                    {
-                        found = new MutationJournalRecord { MutationKey = mutationKey };
-                        doc.Entries.Add(found);
-                    }
-                    // unknown 是不可逆隔离态；迟到 callback 只证明有回执，不能在没有 receipt 查询时自动放开重发。
-                    if (found.Status == "unknown" && status == "callback_received") status = "unknown";
-                    string previousStatus = found.Status;
-                    bool previousRetryable = found.Retryable;
-                    found.OperationId = operationId;
-                    found.ToolName = toolName;
-                    found.Status = status;
-                    bool nextRetryable = retryable ?? found.Retryable;
-                    if ((!string.Equals(previousStatus, status, StringComparison.Ordinal)
-                            || previousRetryable != nextRetryable)
-                        && IsTerminalMutationStatus(status, nextRetryable))
-                    {
-                        // 先前“结果未知”投影后来拿到终态时，要生成一条终态追记；旧未知故事不能吞掉新事实。
-                        // Projection 是 batch 级快照，曾被重复保存在每个 step。只清当前 entry
-                        // 会让同批其他 entry 的旧 committed 文本在恢复时冒充最新事实。
-                        foreach (MutationJournalRecord batchEntry in doc.Entries)
-                            if (batchEntry != null && !string.IsNullOrWhiteSpace(found.BatchId)
-                                && string.Equals(batchEntry.BatchId, found.BatchId, StringComparison.Ordinal))
-                            {
-                                batchEntry.ProjectionCommitted = false;
-                                batchEntry.ProjectionText = null;
-                                batchEntry.ProjectionOutcomesJson = null;
-                                batchEntry.ProjectionReceiptsJson = null;
-                            }
-                        found.OutcomeText = null;
-                        found.ProjectionAsset = null;
-                    }
-                    if (context != null)
-                    {
-                        found.WorldId = context.WorldId;
-                        found.TaiwuId = context.TaiwuId;
-                        found.NpcId = context.NpcId;
-                        found.ActorName = context.ActorName;
-                        found.ActorLocation = context.ActorLocation;
-                        found.TargetId = context.TargetId;
-                        found.TargetName = context.TargetName;
-                        found.BatchId = context.BatchId;
-                        found.StepIndex = context.StepIndex;
-                        found.ConversationClearEpoch = context.ConversationClearEpoch;
-                        found.DispatchEnvelopeJson = context.DispatchEnvelopeJson;
-                        found.DispatchEnvelopeDigest = context.DispatchEnvelopeDigest;
-                        found.ProjectionParticipantIdsJson = context.ProjectionParticipantIdsJson;
-                    }
-                    if (status == "prepared" || status == "pending")
-                    {
-                        found.Code = "DISPATCH_PENDING";
-                        found.Receipt = null;
-                        found.BackendReceiptStored = false;
-                        found.AckOutboxCommitted = false;
-                        found.Retryable = true;
-                        found.Message = null;
-                        found.ProjectionAsset = null;
-                    }
-                    if (code != null) found.Code = code;
-                    if (receipt != null)
-                    {
-                        found.Receipt = receipt;
-                        found.BackendReceiptStored = !string.IsNullOrWhiteSpace(receipt);
-                        found.AckOutboxCommitted = false;
-                    }
-                    if (retryable.HasValue) found.Retryable = retryable.Value;
-                    if (message != null) found.Message = message;
-                    if (worldDate > 0) found.WorldDate = worldDate;
-                    found.UpdatedUtcTicks = DateTime.UtcNow.Ticks;
-                    doc.Revision++;
-                    if (doc.Entries.Count > MaxMutationJournalEntries)
-                    {
-                        doc.Entries.Sort((a, b) => (a == null ? 0 : a.UpdatedUtcTicks).CompareTo(b == null ? 0 : b.UpdatedUtcTicks));
-                        int removable = doc.Entries.Count - MaxMutationJournalEntries;
-                        for (int i = 0; i < doc.Entries.Count && removable > 0;)
-                        {
-                            var e = doc.Entries[i];
-                            if (e != null && (e.Status == "prepared" || e.Status == "pending"
-                                || e.Status == "unknown" && e.Retryable || !e.ProjectionCommitted
-                                || e.BackendReceiptStored && !e.AckOutboxCommitted)) { i++; continue; }
-                            doc.Entries.RemoveAt(i);
-                            removable--;
-                        }
-                    }
-                    return SaveMutationJournalDocument(path, doc);
-                }
-                catch (Exception e)
-                {
-                    Debug.LogWarning("[江湖有灵] 同道副作用日志存盘失败:" + e.GetType().Name);
-                    return false;
-                }
-            }
-        }
-
-        private static bool SaveMutationJournalDocument(string path, MutationJournalDocument doc)
-        {
-            try
-            {
-                int compacted = PruneSettledMutationRecords(doc);
-                if (!MutationJournalDocumentFits(doc))
-                    throw new InvalidDataException("同道副作用日志字段或集合超过安全上限");
-                string dir = Path.GetDirectoryName(path);
-                if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-                string tmp = path + ".tmp", bak = path + ".bak";
-                string promote = path + ".promote";
-                string serialized = JsonConvert.SerializeObject(doc, Formatting.Indented);
-                byte[] bytes = new UTF8Encoding(false, true).GetBytes(serialized);
-                if (bytes.Length > MaxMutationJournalBytes)
-                    throw new InvalidDataException("同道副作用日志超过安全上限");
-                WriteMutationJournalBytes(tmp, bytes);
-                var staged = ReadMutationJournalCandidate(tmp);
-                if (!SameMutationJournal(doc, staged))
-                    throw new InvalidDataException("副作用日志 tmp 严格读回不一致");
-                // Keep tmp as a same-revision recovery replica; publish main from a
-                // separately flushed source, then mirror the current commit into bak.
-                WriteMutationJournalBytes(promote, bytes);
-                var promotion = ReadMutationJournalCandidate(promote);
-                if (!SameMutationJournal(doc, promotion))
-                    throw new InvalidDataException("副作用日志 promotion 严格读回不一致");
-                if (File.Exists(path)) File.Replace(promote, path, bak); else File.Move(promote, path);
-                var committed = ReadMutationJournalCandidate(path);
-                var replica = ReadMutationJournalCandidate(tmp);
-                if (!SameMutationJournal(doc, committed)
-                    || !SameMutationJournal(doc, replica))
-                    throw new InvalidDataException("副作用日志 main 提交读回不一致");
-                // main 是提交点，tmp 是同 revision、独立 flush 的恢复副本。走到这里时
-                // prepared 信封已经具备两份可读当前提交，调用方必须继续原派发；若仅因
-                // 第三份 bak 刷新失败而返回 false，就会留下“本次明确未派发、重启却按
-                // prepared 恢复派发”的延迟副作用。bak 仍尽力刷新；失败时下次 Load
-                // 会先从权威 main 补齐 tmp+bak，补齐前保持 fail-closed。
-                try
-                {
-                    WriteMutationJournalBytes(bak, bytes);
-                    var backup = ReadMutationJournalCandidate(bak);
-                    if (!SameMutationJournal(doc, backup))
-                        Debug.LogWarning("[江湖有灵] 同道副作用日志 bak 读回不一致；main+tmp 已提交，本次继续原派发");
-                }
-                catch (Exception backupError)
-                {
-                    Debug.LogWarning("[江湖有灵] 同道副作用日志 bak 刷新失败；main+tmp 已提交，本次继续原派发:"
-                        + backupError.GetType().Name);
-                }
-                if (compacted > 0)
-                    Debug.Log("[JHYL_COMPANION_JOURNAL_COMPACTED] removed=" + compacted
-                        + " remaining=" + doc.Entries.Count);
-                return true; // JHYL_COMPANION_JOURNAL_MAIN_TMP_COMMIT_POINT
-            }
-            catch (Exception e)
-            {
-                Debug.LogWarning("[江湖有灵] 同道副作用日志原子提交失败:" + e.GetType().Name);
-                return false;
-            }
-        }
-
-        private static void WriteMutationJournalBytes(string path, byte[] bytes)
-        {
-            using (var stream = new FileStream(path, FileMode.Create,
-                FileAccess.Write, FileShare.None))
-            {
-                stream.Write(bytes, 0, bytes.Length);
-                stream.Flush(true);
-            }
-        }
-
-        private static bool UpdateMutationProjectionEvidence(string path, string mutationKey,
-            string outcomeText, string projectionAsset)
-        {
-            lock (JournalIo)
-            {
-                var doc = LoadMutationJournal(path);
-                if (doc == null || doc.Entries == null) return false;
-                MutationJournalRecord found = null;
-                foreach (var entry in doc.Entries)
-                    if (entry != null && entry.MutationKey == mutationKey) { found = entry; break; }
-                if (found == null) return false;
-                found.OutcomeText = outcomeText;
-                found.ProjectionAsset = projectionAsset;
-                found.UpdatedUtcTicks = DateTime.UtcNow.Ticks;
-                doc.Revision++;
-                return SaveMutationJournalDocument(path, doc);
-            }
-        }
-
-        private static MutationJournalDocument LoadMutationJournal(string path)
-        {
-            // main 是最后一次已发布的提交，只要可读就是唯一权威。孤本高 revision tmp 只是
-            // 被中断的未来写入：调用方已收到 checkpoint 失败并放弃派发，采信它会把从未
-            // 跨过 prepared 屏障的信封当成已承诺事实，交给 operation_not_found 恢复派发重放。
-            var main = ReadMutationJournalCandidate(path);
-            if (main != null)
-            {
-                var currentTmp = ReadMutationJournalCandidate(path + ".tmp");
-                var currentBak = ReadMutationJournalCandidate(path + ".bak");
-                if (SameMutationJournal(main, currentTmp)
-                    && SameMutationJournal(main, currentBak)) return main;
-                // Legacy writers left tmp missing and bak one revision behind.  A valid main is
-                // still authoritative, but do not begin/continue monthly mutations until the
-                // exact current commit has two independently flushed recovery replicas.
-                try
-                {
-                    string serialized = JsonConvert.SerializeObject(main, Formatting.Indented);
-                    byte[] bytes = new UTF8Encoding(false, true).GetBytes(serialized);
-                    if (bytes.Length > MaxMutationJournalBytes) return null;
-                    if (!CurrentCommitReplicaPair.TryPublish(path + ".tmp",
-                        path + ".bak", bytes, MaxMutationJournalBytes)) return null;
-                    currentTmp = ReadMutationJournalCandidate(path + ".tmp");
-                    currentBak = ReadMutationJournalCandidate(path + ".bak");
-                    if (SameMutationJournal(main, currentTmp)
-                        && SameMutationJournal(main, currentBak)) return main;
-                }
-                catch { }
-                Debug.LogWarning("[江湖有灵] 同道副作用 journal 当前 main 有效，但无法建立同 revision 双副本；本轮 fail-closed");
-                return null;
-            }
-            if (!File.Exists(path) && !File.Exists(path + ".tmp") && !File.Exists(path + ".bak"))
-                return new MutationJournalDocument();
-            // main 缺失/损坏时任何单副本都不具备权威性：必须 tmp 与 bak 两份独立副本
-            // revision 与内容完全一致才可恢复，否则 fail-closed 返回 null 交由调用方拒绝。
-            var tmp = ReadMutationJournalCandidate(path + ".tmp");
-            var bak = ReadMutationJournalCandidate(path + ".bak");
-            if (tmp == null || bak == null || tmp.Revision != bak.Revision
-                || !SameMutationJournal(tmp, bak))
-            {
-                // fail-closed 是安全姿态，但必须指名文件给出人工恢复路径：单副本可能含
-                // 从未派发的 prepared 信封，程序不得自动采信；确认游戏内该月同道动作
-                // 均未发生后，移走这些残档即可恢复同道过月行事。
-                Debug.LogWarning("[江湖有灵] 同道副作用 journal 无法可靠恢复(main 缺失/损坏且 tmp/bak 不构成一致双副本)。"
-                    + "同道过月行事将保持停用以防重放未派发的副作用。人工恢复:先核对游戏内该月同道动作确未发生,"
-                    + "再把以下残档移出目录(保留备份):" + path + "、" + path + ".tmp、" + path + ".bak");
-                return null;
-            }
-            var best = tmp;
-            // JHYL_COMPANION_JOURNAL_REPAIR_MAIN: 双副本一致的恢复结果先提交回 main，
-            // 后续读写才能回到 main 权威路径；提交失败时同样 fail-closed，
-            // 绝不把仅存在于副本中的状态直接交给对账或恢复派发。
-            if (!SaveMutationJournalDocument(path, best))
-            {
-                Debug.LogWarning("[江湖有灵] 同道副作用 journal 双副本一致，但恢复提交 main 失败");
-                return null;
-            }
-            return best;
-        }
-
-        private static MutationJournalDocument ReadMutationJournalCandidate(string path)
-        {
-            try
-            {
-                if (!File.Exists(path)) return null;
-                long length = new FileInfo(path).Length;
-                if (length < 0 || length > MaxMutationJournalBytes) return null;
-                byte[] bytes = File.ReadAllBytes(path);
-                if (bytes.Length > MaxMutationJournalBytes) return null;
-                if (bytes.Length >= 2 && (bytes[0] == 0xff && bytes[1] == 0xfe
-                    || bytes[0] == 0xfe && bytes[1] == 0xff)) return null;
-                string json = new UTF8Encoding(false, true).GetString(bytes);
-                JObject root;
-                using (var sr = new StringReader(json))
-                using (var reader = new JsonTextReader(sr) { DateParseHandling = DateParseHandling.None })
-                {
-                    root = JObject.Load(reader, new JsonLoadSettings
-                    {
-                        DuplicatePropertyNameHandling = DuplicatePropertyNameHandling.Error,
-                        CommentHandling = CommentHandling.Ignore,
-                        LineInfoHandling = LineInfoHandling.Ignore,
-                    });
-                    while (reader.Read()) if (reader.TokenType != JsonToken.Comment) return null;
-                }
-                var serializer = JsonSerializer.Create(new JsonSerializerSettings
-                {
-                    MissingMemberHandling = MissingMemberHandling.Error,
-                });
-                var value = root.ToObject<MutationJournalDocument>(serializer);
-                if (value == null || value.Version < 1 || value.Version > 8 || value.Revision < 0
-                    || value.Entries == null || value.Entries.Count > MaxMutationJournalEntries) return null;
-                int sourceVersion = value.Version;
-                if (value.Version < 2)
-                {
-                    // v1 没有 Retryable；其 unknown 全部来自超时/未确认，升级时必须继续 fail-closed 对账。
-                    foreach (var entry in value.Entries)
-                        if (entry != null && entry.Status == "unknown") entry.Retryable = true;
-                    value.Version = 2;
-                }
-                var keys = new HashSet<string>(StringComparer.Ordinal);
-                var operationIds = new HashSet<string>(StringComparer.Ordinal);
-                var batchSteps = new HashSet<string>(StringComparer.Ordinal);
-                foreach (var entry in value.Entries)
-                {
-                    if (entry == null || string.IsNullOrWhiteSpace(entry.MutationKey)
-                        || !OperationId.IsValid(entry.OperationId) || !operationIds.Add(entry.OperationId)
-                        || !keys.Add(entry.MutationKey)
-                        || !IsValidMutationJournalStatus(entry.Status)
-                        || entry.RecoveryDispatchCount < 0 || entry.RecoveryDispatchCount > 1
-                        || entry.ProjectionCommitted && string.IsNullOrWhiteSpace(entry.ProjectionText)
-                        || !MutationJournalTextFits(entry)) return null;
-                    if (!string.IsNullOrWhiteSpace(entry.DispatchEnvelopeJson))
-                    {
-                        try
-                        {
-                            var envelope = JObject.Parse(entry.DispatchEnvelopeJson);
-                            if (sourceVersion >= 3 && (envelope.Value<int?>("_actorId") != entry.NpcId
-                                || envelope.Value<int?>("_taiwuId") != entry.TaiwuId
-                                || (envelope.Value<int?>("_targetId") ?? 0) <= 0)) return null;
-                            if (sourceVersion < 6)
-                            {
-                                entry.TargetId = envelope.Value<int?>("_targetId") ?? 0;
-                                entry.TargetName = envelope.Value<string>("_targetName");
-                                if (string.IsNullOrWhiteSpace(entry.TargetName) && entry.TargetId > 0)
-                                    entry.TargetName = "#" + entry.TargetId;
-                            }
-                            else if (envelope.Value<int?>("_targetId") != entry.TargetId) return null;
-                            if (sourceVersion < 6 && string.IsNullOrWhiteSpace(entry.ProjectionParticipantIdsJson))
-                            {
-                                var migrated = new SortedSet<int>();
-                                int actor = envelope.Value<int?>("_actorId") ?? 0;
-                                int taiwu = envelope.Value<int?>("_taiwuId") ?? 0;
-                                int target = envelope.Value<int?>("_targetId") ?? 0;
-                                if (actor > 0) migrated.Add(actor);
-                                if (taiwu > 0) migrated.Add(taiwu);
-                                if (target > 0) migrated.Add(target);
-                                entry.ProjectionParticipantIdsJson = JsonConvert.SerializeObject(migrated, Formatting.None);
-                            }
-                        }
-                        catch { return null; }
-                    }
-                    if (!string.IsNullOrWhiteSpace(entry.DispatchEnvelopeDigest)
-                        && !DispatchEnvelopeBinding.Matches("companion|" + entry.MutationKey,
-                            entry.DispatchEnvelopeJson, entry.DispatchEnvelopeDigest,
-                            entry.OperationId))
-                        return null;
-                    if (sourceVersion >= 3 && (!TryParseProjectionParticipantIds(entry.ProjectionParticipantIdsJson,
-                            out HashSet<int> participantIds)
-                        || !participantIds.Contains(entry.NpcId) || !participantIds.Contains(entry.TaiwuId)
-                        || !TryReadCompanionEnvelopeTarget(entry.DispatchEnvelopeJson, out int envelopeTarget)
-                        || envelopeTarget != entry.TargetId || !participantIds.Contains(entry.TargetId)
-                        || string.IsNullOrWhiteSpace(entry.ActorName)
-                        || string.IsNullOrWhiteSpace(entry.TargetName))) return null;
-                    if (!ProjectionOutcomesShapeValid(entry.ProjectionOutcomesJson)) return null;
-                    if (!ProjectionReceiptsShapeValid(entry.ProjectionReceiptsJson)) return null;
-                    // v3 新 checkpoint 必须具备可恢复实体身份与派发信封；v1/v2 只读兼容并继续隔离，绝不猜测补发。
-                    if (sourceVersion >= 3 && (entry.WorldId == 0 || entry.TaiwuId <= 0 || entry.NpcId <= 0
-                        || entry.TargetId <= 0
-                        || string.IsNullOrWhiteSpace(entry.BatchId) || string.IsNullOrWhiteSpace(entry.DispatchEnvelopeJson)
-                        || entry.StepIndex < 0 || entry.StepIndex >= MaxJournalStepsPerBatch
-                        || entry.WorldDate < 0 || entry.ConversationClearEpoch < 0 || entry.UpdatedUtcTicks < 0
-                        || !batchSteps.Add(entry.BatchId + "|" + entry.StepIndex)))
-                        return null;
-                    if (sourceVersion >= 4 && (entry.BackendReceiptStored != !string.IsNullOrWhiteSpace(entry.Receipt)
-                        || entry.AckOutboxCommitted && (!entry.BackendReceiptStored || !entry.ProjectionCommitted
-                            || !IsTerminalMutationStatus(entry.Status, entry.Retryable)))) return null;
-                    if (!string.IsNullOrWhiteSpace(entry.Receipt)) entry.BackendReceiptStored = true;
-                }
-                value.Version = 8;
-                return value;
-            }
-            catch { return null; }
-        }
-
-        private static bool IsValidMutationJournalStatus(string status)
-            => status == "prepared" || status == "pending" || status == "succeeded" || status == "failed"
-                || status == "rejected" || status == "canceled" || status == "unknown"
-                || status == "callback_received"; // 只读兼容早期 v1；新写入不再生成。
-
-        private static bool MutationJournalTextFits(MutationJournalRecord entry)
-        {
-            if (entry == null) return false;
-            bool Fits(string value, int max) => value == null || value.Length <= max;
-            return Fits(entry.OperationId, 256) && Fits(entry.MutationKey, 32 * 1024)
-                && Fits(entry.ToolName, 128) && Fits(entry.Status, 32) && Fits(entry.Code, 1024)
-                && Fits(entry.Receipt, 256 * 1024) && Fits(entry.Message, 64 * 1024)
-                && Fits(entry.ActorName, 1024) && Fits(entry.ActorLocation, 2048)
-                && Fits(entry.TargetName, 1024) && Fits(entry.BatchId, 1024)
-                && Fits(entry.DispatchEnvelopeJson, 256 * 1024)
-                && Fits(entry.DispatchEnvelopeDigest, 256)
-                && Fits(entry.OutcomeText, 64 * 1024)
-                && Fits(entry.ProjectionAsset, 8192)
-                && Fits(entry.ProjectionOutcomesJson, 512 * 1024)
-                && Fits(entry.ProjectionReceiptsJson, 512 * 1024)
-                && Fits(entry.ProjectionParticipantIdsJson, 8192)
-                && Fits(entry.ProjectionText, 64 * 1024);
-        }
-
-        private static bool MutationJournalDocumentFits(MutationJournalDocument doc)
-        {
-            if (doc == null || doc.Version < 1 || doc.Version > 8 || doc.Revision < 0
-                || doc.Entries == null || doc.Entries.Count > MaxMutationJournalEntries) return false;
-            var keys = new HashSet<string>(StringComparer.Ordinal);
-            var operations = new HashSet<string>(StringComparer.Ordinal);
-            var batchSteps = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var entry in doc.Entries)
-            {
-                if (entry == null || string.IsNullOrWhiteSpace(entry.MutationKey) || !keys.Add(entry.MutationKey)
-                    || !OperationId.IsValid(entry.OperationId) || !operations.Add(entry.OperationId)
-                    || !IsValidMutationJournalStatus(entry.Status) || !MutationJournalTextFits(entry)
-                    || entry.RecoveryDispatchCount < 0 || entry.RecoveryDispatchCount > 1
-                    || entry.WorldId == 0 || entry.TaiwuId <= 0 || entry.NpcId <= 0
-                    || entry.TargetId <= 0 || string.IsNullOrWhiteSpace(entry.ActorName)
-                    || string.IsNullOrWhiteSpace(entry.TargetName)
-                    || string.IsNullOrWhiteSpace(entry.BatchId) || entry.StepIndex < 0 || entry.StepIndex >= MaxJournalStepsPerBatch
-                    || entry.WorldDate < 0 || entry.ConversationClearEpoch < 0 || entry.UpdatedUtcTicks < 0
-                    || !batchSteps.Add(entry.BatchId + "|" + entry.StepIndex)
-                    || entry.ProjectionCommitted && string.IsNullOrWhiteSpace(entry.ProjectionText)
-                    || !ProjectionOutcomesShapeValid(entry.ProjectionOutcomesJson)
-                    || !ProjectionReceiptsShapeValid(entry.ProjectionReceiptsJson)
-                    || !TryParseProjectionParticipantIds(entry.ProjectionParticipantIdsJson,
-                        out HashSet<int> participantIds)
-                    || !participantIds.Contains(entry.NpcId) || !participantIds.Contains(entry.TaiwuId)
-                    || !TryReadCompanionEnvelopeTarget(entry.DispatchEnvelopeJson, out int envelopeTarget)
-                    || envelopeTarget != entry.TargetId || !participantIds.Contains(entry.TargetId)
-                    || !string.IsNullOrWhiteSpace(entry.DispatchEnvelopeDigest)
-                        && !DispatchEnvelopeBinding.Matches("companion|" + entry.MutationKey,
-                            entry.DispatchEnvelopeJson, entry.DispatchEnvelopeDigest,
-                            entry.OperationId)
-                    || entry.BackendReceiptStored != !string.IsNullOrWhiteSpace(entry.Receipt)
-                    || entry.AckOutboxCommitted && (!entry.BackendReceiptStored || !entry.ProjectionCommitted
-                        || !IsTerminalMutationStatus(entry.Status, entry.Retryable))) return false;
-            }
-            return true;
-        }
-
-        private static bool ProjectionOutcomesShapeValid(string json)
-        {
-            if (string.IsNullOrWhiteSpace(json)) return true;
-            try
-            {
-                var array = JArray.Parse(json);
-                if (array.Count > MaxProjectionOutcomes) return false;
-                foreach (var token in array)
-                    if (token == null || token.Type != JTokenType.String || token.ToString().Length > 64 * 1024)
-                        return false;
-                return true;
-            }
-            catch { return false; }
-        }
-
-        private static bool TryParseProjectionParticipantIds(string json, out HashSet<int> ids)
-        {
-            ids = new HashSet<int>();
-            if (string.IsNullOrWhiteSpace(json)) return false;
-            try
-            {
-                JArray array = JArray.Parse(json);
-                if (array.Count < 2 || array.Count > 64) return false;
-                int previous = 0;
-                foreach (JToken token in array)
-                {
-                    if (token == null || token.Type != JTokenType.Integer) return false;
-                    int id = token.Value<int>();
-                    if (id <= previous || !ids.Add(id)) return false;
-                    previous = id;
-                }
-                return true;
-            }
-            catch { ids.Clear(); return false; }
-        }
-
-        private static bool TryReadCompanionEnvelopeTarget(string json, out int targetId)
-        {
-            targetId = 0;
-            if (string.IsNullOrWhiteSpace(json)) return false;
-            try
-            {
-                JObject envelope = JObject.Parse(json);
-                targetId = envelope.Value<int?>("_targetId") ?? 0;
-                return targetId > 0;
-            }
-            catch { targetId = 0; return false; }
-        }
-
-        private static bool ProjectionReceiptsShapeValid(string json)
-        {
-            if (string.IsNullOrWhiteSpace(json)) return true;
-            try
-            {
-                JArray array;
-                using (var sr = new StringReader(json))
-                using (var reader = new JsonTextReader(sr) { DateParseHandling = DateParseHandling.None })
-                {
-                    array = JArray.Load(reader, new JsonLoadSettings
-                    {
-                        DuplicatePropertyNameHandling = DuplicatePropertyNameHandling.Error,
-                        CommentHandling = CommentHandling.Ignore,
-                        LineInfoHandling = LineInfoHandling.Ignore,
-                    });
-                    while (reader.Read()) if (reader.TokenType != JsonToken.Comment) return false;
-                }
-                if (array.Count > MaxProjectionOutcomes) return false;
-                var operations = new HashSet<string>(StringComparer.Ordinal);
-                foreach (JToken token in array)
-                {
-                    if (!(token is JObject item) || item.Count != 8
-                        || !HasExactProperties(item, "Kind", "OperationId", "ActorId", "TargetId",
-                            "ActorName", "TargetName", "Asset", "Summary")
-                        || item["Kind"]?.Type != JTokenType.String
-                        || item["OperationId"]?.Type != JTokenType.String
-                        || item["ActorId"]?.Type != JTokenType.Integer
-                        || item["TargetId"]?.Type != JTokenType.Integer
-                        || item["ActorName"]?.Type != JTokenType.String
-                        || item["TargetName"]?.Type != JTokenType.String
-                        || item["Asset"]?.Type != JTokenType.String
-                        || item["Summary"]?.Type != JTokenType.String) return false;
-                    string operationId = item.Value<string>("OperationId");
-                    if (!OperationId.IsValid(operationId) || !operations.Add(operationId)
-                        || (item.Value<string>("Kind") ?? "").Length > 128
-                        || (item.Value<string>("ActorName") ?? "").Length > 1024
-                        || (item.Value<string>("TargetName") ?? "").Length > 1024
-                        || (item.Value<string>("Asset") ?? "").Length > 8192
-                        || string.IsNullOrWhiteSpace(item.Value<string>("Summary"))
-                        || item.Value<string>("Summary").Length > 64 * 1024
-                        || item.Value<int>("ActorId") <= 0 || item.Value<int>("TargetId") < 0)
-                        return false;
-                }
-                return true;
-            }
-            catch { return false; }
-        }
-
-        private static bool TryCollectBatchProjectionAuthority(IList<MutationJournalRecord> entries,
-            out HashSet<int> authority)
-        {
-            authority = new HashSet<int>();
-            if (entries == null || entries.Count == 0) return false;
-            uint worldId = 0;
-            int taiwuId = 0, npcId = 0;
-            string batchId = null;
-            foreach (MutationJournalRecord entry in entries)
-            {
-                if (entry == null || entry.WorldId == 0 || entry.TaiwuId <= 0 || entry.NpcId <= 0
-                    || entry.TargetId <= 0 || string.IsNullOrWhiteSpace(entry.ActorName)
-                    || string.IsNullOrWhiteSpace(entry.TargetName)
-                    || string.IsNullOrWhiteSpace(entry.BatchId)) return false;
-                if (worldId == 0)
-                {
-                    worldId = entry.WorldId;
-                    taiwuId = entry.TaiwuId;
-                    npcId = entry.NpcId;
-                    batchId = entry.BatchId;
-                }
-                else if (entry.WorldId != worldId || entry.TaiwuId != taiwuId
-                    || entry.NpcId != npcId || !string.Equals(entry.BatchId, batchId, StringComparison.Ordinal))
-                    return false;
-                if (!TryParseProjectionParticipantIds(entry.ProjectionParticipantIdsJson,
-                    out HashSet<int> entryAuthority)) return false;
-                if (authority.Count == 0)
-                    foreach (int id in entryAuthority) authority.Add(id);
-                else if (!authority.SetEquals(entryAuthority))
-                    return false;
-                if (!TryReadCompanionEnvelopeTarget(entry.DispatchEnvelopeJson, out int targetId)
-                    || !entryAuthority.Contains(entry.NpcId) || !entryAuthority.Contains(entry.TaiwuId)
-                    || targetId != entry.TargetId || !entryAuthority.Contains(entry.TargetId)) return false;
-            }
-            return authority.Contains(npcId) && authority.Contains(taiwuId);
-        }
-
-        private static bool CompanionProjectionReceiptsMatchJournal(IList<MutationJournalRecord> entries,
-            IList<string> outcomes, IList<StoryProjectionReceipt> receipts, ISet<int> authority)
-        {
-            if (entries == null || entries.Count == 0 || outcomes == null || authority == null) return false;
-            var byOperation = new Dictionary<string, MutationJournalRecord>(StringComparer.Ordinal);
-            foreach (MutationJournalRecord entry in entries)
-                if (entry == null || !OperationId.IsValid(entry.OperationId)
-                    || byOperation.ContainsKey(entry.OperationId)) return false;
-                else byOperation.Add(entry.OperationId, entry);
-
-            MutationJournalRecord first = entries[0];
-            var seen = new HashSet<string>(StringComparer.Ordinal);
-            foreach (StoryProjectionReceipt receipt in receipts ?? new List<StoryProjectionReceipt>())
-            {
-                if (receipt == null || !OperationId.IsValid(receipt.OperationId)
-                    || !seen.Add(receipt.OperationId)) return false;
-                string kind = StoryProjectionValidator.KindForTool(receipt.Kind);
-                if (string.IsNullOrWhiteSpace(kind)) kind = (receipt.Kind ?? string.Empty).Trim().ToLowerInvariant();
-                if (string.Equals(kind, "remember", StringComparison.Ordinal)
-                    && !byOperation.ContainsKey(receipt.OperationId))
-                {
-                    bool stableLocalId = false;
-                    for (int step = 0; step < MaxJournalStepsPerBatch; step++)
-                    {
-                        string expected = OperationId.FromStableKey("companion-local-story|" + first.WorldId
-                            + "|" + first.BatchId + "|" + step + "|remember");
-                        if (string.Equals(expected, receipt.OperationId, StringComparison.Ordinal))
-                        { stableLocalId = true; break; }
-                    }
-                    if (!stableLocalId || receipt.ActorId != first.NpcId || receipt.TargetId != first.NpcId
-                        || !authority.Contains(receipt.ActorId)
-                        || !string.Equals((receipt.ActorName ?? string.Empty).Trim(),
-                            (first.ActorName ?? string.Empty).Trim(), StringComparison.Ordinal)
-                        || !string.Equals((receipt.TargetName ?? string.Empty).Trim(),
-                            (first.ActorName ?? string.Empty).Trim(), StringComparison.Ordinal)
-                        || !string.IsNullOrWhiteSpace(receipt.Asset)) return false;
-                    continue;
-                }
-                if (string.Equals(kind, "message", StringComparison.Ordinal)
-                    && !byOperation.ContainsKey(receipt.OperationId))
-                {
-                    bool stableLocalId = false;
-                    for (int step = 0; step < MaxJournalStepsPerBatch; step++)
-                    {
-                        string expected = OperationId.FromStableKey("companion-local-story|" + first.WorldId
-                            + "|" + first.BatchId + "|" + step + "|send_message|" + receipt.TargetId);
-                        if (string.Equals(expected, receipt.OperationId, StringComparison.Ordinal))
-                        { stableLocalId = true; break; }
-                    }
-                    if (!stableLocalId || receipt.ActorId != first.NpcId || receipt.TargetId <= 0
-                        || receipt.TargetId == receipt.ActorId || !authority.Contains(receipt.ActorId)
-                        || !authority.Contains(receipt.TargetId)
-                        || !string.Equals((receipt.ActorName ?? string.Empty).Trim(),
-                            (first.ActorName ?? string.Empty).Trim(), StringComparison.Ordinal)
-                        || string.IsNullOrWhiteSpace(receipt.TargetName)
-                        || string.IsNullOrWhiteSpace(receipt.Asset)
-                        || string.IsNullOrWhiteSpace(receipt.Summary)) return false;
-                    continue;
-                }
-
-                if (!byOperation.TryGetValue(receipt.OperationId, out MutationJournalRecord entry)
-                    || !string.Equals(entry.Status, "succeeded", StringComparison.Ordinal)
-                    || !entry.BackendReceiptStored || string.IsNullOrWhiteSpace(entry.Receipt)
-                    || !string.Equals(StoryProjectionValidator.KindForTool(entry.ToolName), kind, StringComparison.Ordinal)
-                    || receipt.ActorId != entry.NpcId
-                    || receipt.TargetId != entry.TargetId
-                    || !string.Equals((receipt.ActorName ?? string.Empty).Trim(),
-                        (entry.ActorName ?? string.Empty).Trim(), StringComparison.Ordinal)
-                    || !string.Equals((receipt.TargetName ?? string.Empty).Trim(),
-                        (entry.TargetName ?? string.Empty).Trim(), StringComparison.Ordinal)
-                    || !string.Equals((receipt.Asset ?? string.Empty).Trim(),
-                        (entry.ProjectionAsset ?? string.Empty).Trim(), StringComparison.Ordinal)
-                    || !string.Equals(entry.OutcomeText, "成功:" + (receipt.Summary ?? string.Empty).Trim(), StringComparison.Ordinal))
-                    return false;
-            }
-            return StoryProjectionValidator.TryBuildDurableProjection(outcomes, receipts, authority,
-                out _, out _);
-        }
-
-        private static bool HasExactProperties(JObject value, params string[] names)
-        {
-            if (value == null || value.Count != names.Length) return false;
-            var expected = new HashSet<string>(names, StringComparer.Ordinal);
-            foreach (JProperty property in value.Properties())
-                if (!expected.Remove(property.Name)) return false;
-            return expected.Count == 0;
-        }
-
-        private static bool SameMutationJournal(MutationJournalDocument expected, MutationJournalDocument actual)
-        {
-            if (expected == null || actual == null || expected.Version != actual.Version
-                || expected.Revision != actual.Revision || expected.Entries == null || actual.Entries == null
-                || expected.Entries.Count != actual.Entries.Count) return false;
-            // 属性顺序由同一 DTO 固定；规范化为单行 JSON 可同时核对全部状态、回执和消息字段。
-            return string.Equals(JsonConvert.SerializeObject(expected, Formatting.None),
-                JsonConvert.SerializeObject(actual, Formatting.None), StringComparison.Ordinal);
-        }
-
-        // JHYL_COMPANION_OPERATION_RECONCILE_BOUNDED:启动批次前先查 receipt；只有权威
-        // operation_not_found 才按 durable 信封与同一 operationId 做一次恢复派发。
-        private static IEnumerator ReconcileCompanionMutationJournal(int generation, int taiwuId, Action<bool> onDone)
-        {
-            if (!WorldLifecycle.IsSameWorld(generation)) { onDone?.Invoke(false); yield break; }
-            string path = MutationJournalPath(WorldLifecycle.WorldId);
-            MutationJournalDocument document;
-            lock (JournalIo) document = LoadMutationJournal(path);
-            if (document == null || document.Entries == null)
-            {
-                Debug.LogWarning("[江湖有灵] 同道副作用 journal 存在但无法恢复，拒绝启动批次");
-                onDone?.Invoke(false);
-                yield break;
-            }
-            foreach (var entry in document.Entries)
-                if (entry != null && entry.WorldId != 0 && entry.WorldId != WorldLifecycle.WorldId)
-                {
-                    Debug.LogWarning("[江湖有灵] 同道副作用 journal 世界身份不匹配，拒绝查询或派发 op=" + entry.OperationId);
-                    onDone?.Invoke(false);
-                    yield break;
-                }
-
-            var unresolved = new List<MutationJournalRecord>();
-            foreach (var entry in document.Entries)
-                if (entry != null && entry.WorldId == WorldLifecycle.WorldId && entry.TaiwuId == taiwuId
-                    && (entry.Status == "prepared" || entry.Status == "pending"
-                    || entry.Status == "unknown" && entry.Retryable)) unresolved.Add(entry);
-            foreach (var entry in unresolved)
-            {
-                if (!WorldLifecycle.IsSameWorld(generation)) { onDone?.Invoke(false); yield break; }
-                if (string.IsNullOrWhiteSpace(entry.MutationKey) || !OperationId.IsValid(entry.OperationId))
-                {
-                    Debug.LogWarning("[江湖有灵] 同道副作用 journal 条目损坏，保持 fail-closed op=" + (entry.OperationId ?? "(空)"));
-                    onDone?.Invoke(false);
-                    yield break;
-                }
-                ToolOutcome outcome = null; bool done = false;
-                EffectHandler.QueryOperation(entry.WorldId, entry.TaiwuId, entry.OperationId,
-                    value => { outcome = value; done = true; });
-                float deadline = Time.unscaledTime + OperationReconcileWaitSeconds;
-                while (!done && Time.unscaledTime < deadline && WorldLifecycle.IsSameWorld(generation)) yield return null;
-                if (!WorldLifecycle.IsSameWorld(generation)) { onDone?.Invoke(false); yield break; }
-                if (!done || outcome == null)
-                {
-                    Debug.LogWarning("[江湖有灵] 同道副作用 receipt 查询超时，继续隔离 op=" + entry.OperationId);
-                    continue;
-                }
-                if (IsOperationNotFound(outcome) && entry.RecoveryDispatchCount == 0
-                    && entry.WorldId == WorldLifecycle.WorldId && entry.TaiwuId == taiwuId && entry.NpcId > 0
-                    && CompanionEnvelopeMatchesRecord(entry))
-                {
-                    bool rosterReliable = false, rosterAllowed = false;
-                    string rosterMessage = null;
-                    yield return RevalidateCompanionRecoveryRoster(entry, generation,
-                        (reliable, allowed, message) =>
-                        {
-                            rosterReliable = reliable;
-                            rosterAllowed = allowed;
-                            rosterMessage = message;
-                        });
-                    if (!WorldLifecycle.IsSameWorld(generation)) { onDone?.Invoke(false); yield break; }
-                    if (!rosterReliable)
-                    {
-                        Debug.LogWarning("[江湖有灵] 同道恢复派发无法可靠取得当前队伍，继续隔离 op="
-                            + entry.OperationId + " " + (rosterMessage ?? ""));
-                        continue;
-                    }
-                    if (!rosterAllowed)
-                    {
-                        // operation_not_found 已证明后端没有这笔操作；当前同道资格又已失效，
-                        // 因而可以安全地在本地终结，绝不能沿用旧队伍授权重放副作用。
-                        if (!CancelCompanionRecoveryForRosterChange(path, entry.MutationKey,
-                            rosterMessage ?? "行动者或动作端点已不再是当前同道"))
-                        { onDone?.Invoke(false); yield break; }
-                        lock (MutationGate) UnknownMutationQuarantine.Remove(entry.MutationKey);
-                        Debug.LogWarning("[江湖有灵] 同道恢复派发因当前队伍已变化而取消 op="
-                            + entry.OperationId + " " + (rosterMessage ?? ""));
-                        continue;
-                    }
-                    if (!EffectHandler.PrepareOperationIdentity(entry.WorldId, entry.TaiwuId, entry.OperationId))
-                    { onDone?.Invoke(false); yield break; }
-                    if (!CheckpointCompanionRecoveryDispatch(path, entry.MutationKey))
-                    { EffectHandler.DiscardPreparedOperation(entry.OperationId); onDone?.Invoke(false); yield break; }
-                    ToolOutcome recoveryDispatchOutcome = null;
-                    if (!EffectHandler.ObserveOperationOutcome(entry.OperationId,
-                            value => recoveryDispatchOutcome = value))
-                    {
-                        EffectHandler.DiscardPreparedOperation(entry.OperationId);
-                        onDone?.Invoke(false);
-                        yield break;
-                    }
-                    string dispatchResult = null; bool dispatchDone = false;
-                    yield return RedispatchCompanionEnvelope(entry.ToolName, entry.DispatchEnvelopeJson,
-                        entry.OperationId, value => { dispatchResult = value; dispatchDone = true; });
-                    bool recoveryWasDispatched = EffectHandler.WasOperationDispatched(entry.OperationId);
-                    EffectHandler.ForgetOperationOutcomeObserver(entry.OperationId);
-                    if (!dispatchDone)
-                        Debug.LogWarning("[江湖有灵] 同道 operation_not_found 恢复派发未得到业务 callback op=" + entry.OperationId);
-                    else
-                        Debug.Log("[江湖有灵] 同道 operation_not_found 已执行唯一一次恢复派发 op=" + entry.OperationId
-                            + " callback=" + (dispatchResult ?? "(空)"));
-                    if (!recoveryWasDispatched)
-                    {
-                        EffectHandler.DiscardPreparedOperation(entry.OperationId);
-                        if (recoveryDispatchOutcome != null && recoveryDispatchOutcome.Retryable)
-                        {
-                            Debug.LogWarning("[江湖有灵] 同道恢复派发在触及后端前遇到可重试本地故障，"
-                                + "保留零次派发资格 op=" + entry.OperationId + " code="
-                                + (recoveryDispatchOutcome.Code ?? "unknown"));
-                            continue;
-                        }
-                        if (!CancelCompanionRecoveryBeforeDispatch(path, entry.MutationKey,
-                                recoveryDispatchOutcome?.Code ?? "RECOVERY_LOCAL_PRECONDITION_REJECTED",
-                                dispatchResult ?? recoveryDispatchOutcome?.Message ?? "恢复动作未通过本地前置校验"))
-                        { onDone?.Invoke(false); yield break; }
-                        lock (MutationGate) UnknownMutationQuarantine.Remove(entry.MutationKey);
-                        Debug.LogWarning("[江湖有灵] 同道恢复派发在触及后端前被确定性拒绝，已安全取消 op="
-                            + entry.OperationId + " " + (dispatchResult ?? ""));
-                        continue;
-                    }
-                    if (!WorldLifecycle.IsSameWorld(generation)) { onDone?.Invoke(false); yield break; }
-                    if (!CommitCompanionRecoveryDispatchAttempt(path, entry.MutationKey))
-                    { onDone?.Invoke(false); yield break; }
-                    outcome = null; done = false;
-                    EffectHandler.QueryOperation(entry.WorldId, entry.TaiwuId, entry.OperationId,
-                        value => { outcome = value; done = true; });
-                    deadline = Time.unscaledTime + OperationReconcileWaitSeconds;
-                    while (!done && Time.unscaledTime < deadline && WorldLifecycle.IsSameWorld(generation)) yield return null;
-                    if (!WorldLifecycle.IsSameWorld(generation)) { onDone?.Invoke(false); yield break; }
-                    if (!done || outcome == null)
-                    {
-                        Debug.LogWarning("[江湖有灵] 同道恢复派发后 receipt 查询超时，继续隔离 op=" + entry.OperationId);
-                        continue;
-                    }
-                }
-                if (outcome.IsSucceeded && (!string.Equals(outcome.OperationId, entry.OperationId, StringComparison.Ordinal)
-                    || string.IsNullOrWhiteSpace(outcome.Receipt)))
-                {
-                    outcome = new ToolOutcome
-                    {
-                        OperationId = entry.OperationId,
-                        Status = "unknown",
-                        Code = "AUTHORITATIVE_RECEIPT_MISSING_OR_MISMATCHED",
-                        Retryable = true,
-                        Message = "查询返回成功但缺少精确 operationId 的 durable backend receipt",
-                    };
-                }
-                string status = (outcome.Status ?? "unknown").Trim().ToLowerInvariant();
-                if (!UpdateMutationJournal(path, entry.MutationKey, entry.OperationId, entry.ToolName, status,
-                    entry.WorldDate, outcome.Code, outcome.Receipt, outcome.Retryable, outcome.Message))
-                { onDone?.Invoke(false); yield break; }
-
-                lock (MutationGate)
-                {
-                    if (outcome.IsTerminal) UnknownMutationQuarantine.Remove(entry.MutationKey);
-                    else UnknownMutationQuarantine.Add(entry.MutationKey);
-                }
-                if (outcome.IsTerminal)
-                {
-                    Debug.Log("[江湖有灵] 同道副作用 receipt 已恢复终态 op=" + entry.OperationId + " status=" + status + " code=" + (outcome.Code ?? ""));
-                }
-                else
-                    Debug.LogWarning("[江湖有灵] 同道副作用 receipt 仍非终态，继续隔离 op=" + entry.OperationId + " status=" + status + " code=" + (outcome.Code ?? ""));
-            }
-            if (!RecoverCompanionBatchProjections(path, generation, taiwuId))
-            {
-                onDone?.Invoke(false);
-                yield break;
-            }
-            AcknowledgeAllProjectedCompanionOutcomes(path);
-            onDone?.Invoke(true);
-        }
-
-        private static bool IsOperationNotFound(ToolOutcome outcome)
-            => outcome != null && string.Equals(outcome.Code, "operation_not_found", StringComparison.OrdinalIgnoreCase);
-
-        private static bool CompanionEnvelopeMatchesRecord(MutationJournalRecord entry)
-        {
-            if (entry == null || string.IsNullOrWhiteSpace(entry.DispatchEnvelopeJson)) return false;
-            try
-            {
-                if (!DispatchEnvelopeBinding.Matches("companion|" + entry.MutationKey,
-                        entry.DispatchEnvelopeJson, entry.DispatchEnvelopeDigest,
-                        entry.OperationId))
-                    return false;
-                var envelope = JObject.Parse(entry.DispatchEnvelopeJson);
-                int actorId = envelope.Value<int?>("_actorId") ?? 0;
-                int taiwuId = envelope.Value<int?>("_taiwuId") ?? 0;
-                int targetId = envelope.Value<int?>("_targetId") ?? 0;
-                bool physicalGuard = envelope.Value<bool?>("_physicalGuard") ?? false;
-                uint sceneWorldId;
-                string endpointCsv = envelope.Value<string>("_physicalEndpoints");
-                var expectedEndpoints = ParsePhysicalEndpoints(endpointCsv);
-                var computedEndpoints = new SortedSet<int>();
-                if (physicalGuard)
-                {
-                    if (actorId > 0) computedEndpoints.Add(actorId);
-                    if (targetId > 0) computedEndpoints.Add(targetId);
-                    if (computedEndpoints.Count == 1 && taiwuId > 0) computedEndpoints.Add(taiwuId);
-                }
-                return actorId == entry.NpcId
-                    && taiwuId == entry.TaiwuId
-                    && targetId > 0
-                    && uint.TryParse(envelope.Value<string>("_sceneWorldId"), out sceneWorldId)
-                    && sceneWorldId == entry.WorldId
-                    && envelope.Value<short?>("_sceneAreaId").HasValue
-                    && envelope.Value<short?>("_sceneBlockId").HasValue
-                    && physicalGuard == RequiresCompanionPhysicalEnvelope(
-                        entry.ToolName, actorId, targetId)
-                    && expectedEndpoints != null && expectedEndpoints.SetEquals(computedEndpoints)
-                    && string.Equals(NormalizePlanToolName(envelope.Value<string>("_tool")),
-                        NormalizePlanToolName(entry.ToolName), StringComparison.Ordinal);
-            }
-            catch { return false; }
-        }
-
-        /// <summary>
-        /// operation_not_found 只证明原 RPC 未到达后端，并不延续旧月的同道授权。
-        /// 恢复派发前重新读取游戏 GetGroupSet：行动者必须仍是当前同道。物理端点还须
-        /// 位于当前同行同道或太吾同块人物集合；远程言语动作只校验目标实体仍存在。
-        /// 读取超时或返回不含太吾的异常空集时保持 UNKNOWN 隔离。
-        /// </summary>
-        private static IEnumerator RevalidateCompanionRecoveryRoster(MutationJournalRecord entry, int generation,
-            Action<bool, bool, string> onDone)
-        {
-            if (entry == null || entry.WorldId == 0 || entry.TaiwuId <= 0 || entry.NpcId <= 0
-                || entry.WorldId != WorldLifecycle.WorldId || !WorldLifecycle.IsSameWorld(generation))
-            {
-                onDone?.Invoke(false, false, "恢复记录与当前世界身份不一致");
-                yield break;
-            }
-
-            SortedSet<int> endpoints = null; bool requiresPhysical = false, actorScene = false;
-            int actorId = 0, targetId = 0;
-            int sceneArea = int.MinValue, sceneBlock = int.MinValue;
-            try
-            {
-                var envelope = JObject.Parse(entry.DispatchEnvelopeJson ?? "");
-                endpoints = ParsePhysicalEndpoints(envelope.Value<string>("_physicalEndpoints"));
-                requiresPhysical = envelope.Value<bool?>("_physicalGuard") ?? false;
-                actorScene = envelope.Value<bool?>("_actorScene") ?? false;
-                actorId = envelope.Value<int?>("_actorId") ?? entry.NpcId;
-                targetId = envelope.Value<int?>("_targetId") ?? 0;
-                sceneArea = envelope.Value<int?>("_sceneAreaId") ?? int.MinValue;
-                sceneBlock = envelope.Value<int?>("_sceneBlockId") ?? int.MinValue;
-            }
-            catch { }
-            if (endpoints == null || requiresPhysical != RequiresCompanionPhysicalEnvelope(
-                    entry.ToolName, actorId, targetId)
-                || requiresPhysical && (endpoints.Count < (actorScene ? 1 : 2)
-                    || !endpoints.Contains(entry.NpcId))
-                || !requiresPhysical && endpoints.Count != 0)
-            {
-                onDone?.Invoke(false, false, "恢复记录的动作距离门禁无效");
-                yield break;
-            }
-
-            // JHYL_MANUAL_MONTHLY_RECOVERY: manually selected ordinary NPCs act from their
-            // own authoritative block. They are not companions and must never be rejected
-            // merely because GetGroupSet does not contain them.
-            if (actorScene)
-            {
-                bool eligibilityDone = false, eligibilityReliable = false;
-                List<int> eligibleActors = null;
-                EffectHandler.QueryMonthlyAgentEligibility(new List<int> { entry.NpcId },
-                    (ok, ids, rejected) =>
-                    {
-                        if (!WorldLifecycle.IsSameWorld(generation)
-                            || WorldLifecycle.WorldId != entry.WorldId) return;
-                        eligibilityReliable = ok;
-                        eligibleActors = ids;
-                        eligibilityDone = true;
-                    });
-                float eligibilityDeadline = Time.unscaledTime + OperationReconcileWaitSeconds;
-                while (!eligibilityDone && Time.unscaledTime < eligibilityDeadline
-                    && WorldLifecycle.IsSameWorld(generation)) yield return null;
-                if (!eligibilityDone || !eligibilityReliable
-                    || !WorldLifecycle.IsSameWorld(generation)
-                    || WorldLifecycle.WorldId != entry.WorldId)
-                {
-                    onDone?.Invoke(false, false, "手动过月行动者资格查询失败、超时或世界已变化");
-                    yield break;
-                }
-                if (eligibleActors == null || !eligibleActors.Contains(entry.NpcId))
-                {
-                    onDone?.Invoke(true, false, "手动过月行动者已失效、变为婴儿或不再是可互动人物");
-                    yield break;
-                }
-                if (!requiresPhysical)
-                {
-                    yield return RevalidateMonthlyRecoveryTarget(entry.TargetId, generation, onDone);
-                    yield break;
-                }
-
-                bool actorBlockDone = false, actorBlockOk = false;
-                short actorArea = -1, actorBlock = -1;
-                List<int> actorBlockIds = null;
-                EffectHandler.QueryActorBlockChars(entry.NpcId, (ok, area, block, ids) =>
-                {
-                    actorBlockOk = ok;
-                    actorArea = area;
-                    actorBlock = block;
-                    actorBlockIds = ids;
-                    actorBlockDone = true;
-                });
-                float actorBlockDeadline = Time.unscaledTime + OperationReconcileWaitSeconds;
-                while (!actorBlockDone && Time.unscaledTime < actorBlockDeadline
-                    && WorldLifecycle.IsSameWorld(generation)) yield return null;
-                if (!actorBlockDone || !actorBlockOk)
-                {
-                    onDone?.Invoke(false, false, "手动过月行动者当前地块查询失败或超时");
-                    yield break;
-                }
-                if (actorArea != sceneArea || actorBlock != sceneBlock)
-                {
-                    onDone?.Invoke(true, false, "手动过月行动者已离开动作原现场");
-                    yield break;
-                }
-                var actorPresent = new HashSet<int>();
-                if (actorBlockIds != null)
-                    foreach (int id in actorBlockIds) if (id > 0) actorPresent.Add(id);
-                foreach (int endpointId in endpoints)
-                {
-                    if (actorPresent.Contains(endpointId)) continue;
-                    onDone?.Invoke(true, false,
-                        "物理动作端点#" + endpointId + "已不在行动者当前同块现场");
-                    yield break;
-                }
-                onDone?.Invoke(true, true, null);
-                yield break;
-            }
-
-            bool fetched = false, ageAuthorityReliable = false;
-            List<int> currentGroup = null;
-            EffectHandler.QueryNonBabyCompanionGroup(entry.TaiwuId, (ok, ids) =>
-            {
-                if (!WorldLifecycle.IsSameWorld(generation) || WorldLifecycle.WorldId != entry.WorldId) return;
-                ageAuthorityReliable = ok;
-                currentGroup = ids;
-                fetched = true;
-            });
-            float deadline = Time.unscaledTime + OperationReconcileWaitSeconds;
-            while (!fetched && Time.unscaledTime < deadline && WorldLifecycle.IsSameWorld(generation))
-                yield return null;
-            if (!fetched || !ageAuthorityReliable || !WorldLifecycle.IsSameWorld(generation)
-                || WorldLifecycle.WorldId != entry.WorldId)
-            {
-                onDone?.Invoke(false, false, "当前非婴儿同道名册查询失败、超时或世界已变化");
-                yield break;
-            }
-
-            var group = new HashSet<int>();
-            if (currentGroup != null)
-                foreach (int id in currentGroup) if (id > 0) group.Add(id);
-            // GetGroupSet 的正常结果包含太吾本人；缺失表示反序列化/领域查询失败，
-            // 不能把异常空集误判为所有同道都已离队。
-            if (!group.Contains(entry.TaiwuId))
-            {
-                onDone?.Invoke(false, false, "当前同道名册不含太吾，结果不可作为恢复授权");
-                yield break;
-            }
-            if (!group.Contains(entry.NpcId))
-            {
-                onDone?.Invoke(true, false, "行动者已不在当前同道队伍");
-                yield break;
-            }
-            if (!requiresPhysical)
-            {
-                yield return RevalidateMonthlyRecoveryTarget(entry.TargetId, generation, onDone);
-                yield break;
-            }
-
-            List<int> presentIds = null;
-            bool presenceDone = false, presenceReliable = false;
-            EffectHandler.QueryTaiwuScenePresence(entry.TaiwuId, endpoints,
-                (ok, ids) =>
-                {
-                    presenceReliable = ok;
-                    presentIds = ids;
-                    presenceDone = true;
-                });
-            float presenceDeadline = Time.unscaledTime + OperationReconcileWaitSeconds;
-            while (!presenceDone && Time.unscaledTime < presenceDeadline
-                && WorldLifecycle.IsSameWorld(generation)) yield return null;
-            if (!presenceDone || !presenceReliable)
-            {
-                onDone?.Invoke(false, false, "当前同行、同块或在押现场查询失败或超时");
-                yield break;
-            }
-            var present = new HashSet<int>();
-            if (presentIds != null)
-                foreach (int id in presentIds) if (id > 0) present.Add(id);
-            foreach (int endpointId in endpoints)
-            {
-                if (!present.Contains(endpointId))
-                {
-                    onDone?.Invoke(true, false,
-                        "物理动作端点#" + endpointId + "已不在当前同行、同块或在押现场");
-                    yield break;
-                }
-            }
-            onDone?.Invoke(true, true, null);
-        }
-
-        private static IEnumerator RevalidateMonthlyRecoveryTarget(int targetId, int generation,
-            Action<bool, bool, string> onDone)
-        {
-            bool eligibilityDone = false, eligibilityReliable = false;
-            List<int> eligibleTargets = null;
-            EffectHandler.QueryMonthlyAgentEligibility(new List<int> { targetId },
-                (ok, ids, rejected) =>
-                {
-                    if (!WorldLifecycle.IsSameWorld(generation)) return;
-                    eligibilityReliable = ok;
-                    eligibleTargets = ids;
-                    eligibilityDone = true;
-                });
-            float deadline = Time.unscaledTime + OperationReconcileWaitSeconds;
-            while (!eligibilityDone && Time.unscaledTime < deadline
-                && WorldLifecycle.IsSameWorld(generation)) yield return null;
-            if (!eligibilityDone || !eligibilityReliable || !WorldLifecycle.IsSameWorld(generation))
-            {
-                onDone?.Invoke(false, false, "远程动作目标资格查询失败、超时或世界已变化");
-                yield break;
-            }
-            if (eligibleTargets == null || !eligibleTargets.Contains(targetId))
-            {
-                onDone?.Invoke(true, false, "远程动作目标已失效、变为婴儿或不再是可互动人物");
-                yield break;
-            }
-            onDone?.Invoke(true, true, null);
-        }
-
-        private static bool CancelCompanionRecoveryForRosterChange(string path, string mutationKey, string message)
-        {
-            lock (JournalIo)
-            {
-                var doc = LoadMutationJournal(path);
-                if (doc == null || doc.Entries == null) return false;
-                MutationJournalRecord found = null;
-                foreach (var entry in doc.Entries)
-                    if (entry != null && entry.MutationKey == mutationKey) { found = entry; break; }
-                if (found == null || found.RecoveryDispatchCount != 0
-                    || !(found.Status == "prepared" || found.Status == "pending"
-                        || found.Status == "unknown" && found.Retryable)) return false;
-
-                found.Status = "canceled";
-                found.Code = "RECOVERY_GROUP_MEMBERSHIP_CHANGED";
-                found.Retryable = false;
-                found.Message = message;
-                // QueryOperation 已权威返回 operation_not_found，因此任何旧 UNKNOWN
-                // receipt 都不再是可 ACK 的后端终态，必须与本地取消一起原子清除。
-                found.Receipt = null;
-                found.BackendReceiptStored = false;
-                found.AckOutboxCommitted = false;
-                found.OutcomeText = null;
-                found.ProjectionOutcomesJson = null;
-                found.ProjectionText = null;
-                found.ProjectionCommitted = false;
-                found.UpdatedUtcTicks = DateTime.UtcNow.Ticks;
-                doc.Revision++;
-                return SaveMutationJournalDocument(path, doc);
-            }
-        }
-
-        private static bool CancelCompanionRecoveryBeforeDispatch(string path, string mutationKey,
-            string code, string message)
-        {
-            lock (JournalIo)
-            {
-                var doc = LoadMutationJournal(path);
-                if (doc == null || doc.Entries == null) return false;
-                MutationJournalRecord found = null;
-                foreach (var entry in doc.Entries)
-                    if (entry != null && entry.MutationKey == mutationKey) { found = entry; break; }
-                if (found == null || found.RecoveryDispatchCount != 0) return false;
-                found.Status = "canceled";
-                found.Code = string.IsNullOrWhiteSpace(code)
-                    ? "RECOVERY_LOCAL_PRECONDITION_REJECTED" : code;
-                found.Retryable = false;
-                found.Message = message;
-                found.Receipt = null;
-                found.BackendReceiptStored = false;
-                found.AckOutboxCommitted = false;
-                found.OutcomeText = null;
-                found.ProjectionOutcomesJson = null;
-                found.ProjectionText = null;
-                found.ProjectionCommitted = false;
-                found.UpdatedUtcTicks = DateTime.UtcNow.Ticks;
-                doc.Revision++;
-                return SaveMutationJournalDocument(path, doc);
-            }
-        }
-
-        private static bool CheckpointCompanionRecoveryDispatch(string path, string mutationKey)
-        {
-            lock (JournalIo)
-            {
-                var doc = LoadMutationJournal(path);
-                if (doc == null || doc.Entries == null) return false;
-                MutationJournalRecord found = null;
-                foreach (var entry in doc.Entries)
-                    if (entry != null && entry.MutationKey == mutationKey) { found = entry; break; }
-                if (found == null || found.RecoveryDispatchCount != 0
-                    || string.IsNullOrWhiteSpace(found.DispatchEnvelopeJson)) return false;
-                found.Status = "prepared";
-                found.Code = "RECOVERY_DISPATCH_CLAIMED";
-                found.Retryable = true;
-                found.UpdatedUtcTicks = DateTime.UtcNow.Ticks;
-                doc.Revision++;
-                return SaveMutationJournalDocument(path, doc);
-            }
-        }
-
-        private static bool CommitCompanionRecoveryDispatchAttempt(string path, string mutationKey)
-        {
-            lock (JournalIo)
-            {
-                var doc = LoadMutationJournal(path);
-                if (doc == null || doc.Entries == null) return false;
-                MutationJournalRecord found = null;
-                foreach (var entry in doc.Entries)
-                    if (entry != null && entry.MutationKey == mutationKey) { found = entry; break; }
-                if (found == null || found.RecoveryDispatchCount != 0) return false;
-                found.RecoveryDispatchCount = 1;
-                found.Code = "RECOVERY_DISPATCH_ATTEMPTED";
-                found.UpdatedUtcTicks = DateTime.UtcNow.Ticks;
-                doc.Revision++;
-                return SaveMutationJournalDocument(path, doc);
-            }
-        }
-
-        private static IEnumerator RedispatchCompanionEnvelope(string toolName, string envelopeJson,
-            string operationId, Action<string> onDone)
-        {
-            JObject a;
-            try { a = JObject.Parse(envelopeJson ?? ""); }
-            catch { onDone?.Invoke("非法派发信封"); yield break; }
-            int Int(string key, int fallback = 0)
-            {
-                JToken token = a[key];
-                if (token == null) return fallback;
-                try { return token.Value<int>(); }
-                catch { int value; return int.TryParse(token.ToString(), out value) ? value : fallback; }
-            }
-            string Str(string key) => a[key] == null ? null : a[key].ToString();
-            bool Bool(string key, bool fallback)
-            {
-                JToken token = a[key];
-                if (token == null) return fallback;
-                try { return token.Value<bool>(); }
-                catch { bool value; return bool.TryParse(token.ToString(), out value) ? value : fallback; }
-            }
-            int actorId = Int("_actorId"), taiwuId = Int("_taiwuId"), targetId = Int("_targetId");
-            if (actorId <= 0 || taiwuId <= 0 || targetId <= 0 || !OperationId.IsValid(operationId))
-            { onDone?.Invoke("非法派发实体身份"); yield break; }
-            uint sceneWorldId;
-            short currentArea, currentBlock;
-            string sceneWorldText = Str("_sceneWorldId");
-            int sceneArea = Int("_sceneAreaId", int.MinValue), sceneBlock = Int("_sceneBlockId", int.MinValue);
-            bool requiresPhysicalEnvelope = RequiresCompanionPhysicalEnvelope(
-                toolName, actorId, targetId);
-            bool actorScene = Bool("_actorScene", false);
-            var physicalEndpoints = requiresPhysicalEnvelope
-                ? ParsePhysicalEndpoints(Str("_physicalEndpoints")) : null;
-            if (!uint.TryParse(sceneWorldText, out sceneWorldId) || sceneWorldId == 0
-                || sceneWorldId != WorldLifecycle.WorldId
-                || sceneArea < short.MinValue || sceneArea > short.MaxValue
-                || sceneBlock < short.MinValue || sceneBlock > short.MaxValue
-                || requiresPhysicalEnvelope && (physicalEndpoints == null || physicalEndpoints.Count < 1))
-            { onDone?.Invoke("恢复派发现场信封无效"); yield break; }
-            if (requiresPhysicalEnvelope)
-            {
-                bool sceneCurrent = false;
-                if (actorScene)
-                {
-                    bool actorLocationDone = false, actorLocationOk = false; short actorArea = -1, actorBlock = -1;
-                    EffectHandler.QueryActorBlockChars(actorId, (ok, area, block, ids) =>
-                    { actorLocationOk = ok; actorArea = area; actorBlock = block; actorLocationDone = true; });
-                    float actorDeadline = Time.unscaledTime + EffectHandler.ReadOnlyQueryWaitSeconds;
-                    while (!actorLocationDone && Time.unscaledTime < actorDeadline) yield return null;
-                    sceneCurrent = actorLocationDone && actorLocationOk
-                        && actorArea == (short)sceneArea && actorBlock == (short)sceneBlock;
-                }
-                else sceneCurrent = NpcSnapshotReader.TryGetCurrentWorldArea(out currentArea, out currentBlock)
-                    && currentArea == (short)sceneArea && currentBlock == (short)sceneBlock;
-                if (!sceneCurrent)
-                { onDone?.Invoke("恢复派发已拒绝:行动者已离开动作原现场"); yield break; }
-            }
-            if (requiresPhysicalEnvelope
-                && !JianghuYouling.Rpc.OperationRpcClient.RegisterGroupPhysicalEnvelope(operationId,
-                    actorId, taiwuId, physicalEndpoints, actorScene))
-            { onDone?.Invoke("恢复派发无法注册同道现场信封"); yield break; }
-            bool finished = false; string result = null;
-            Action<bool, string> finish = (ok, message) =>
-            {
-                result = (ok ? "OK:" : "未成:") + (message ?? (ok ? "已确认" : "引擎拒绝"));
-                finished = true;
-            };
-            try
-            {
-                switch (NormalizePlanToolName(toolName))
-                {
-                    case "gift_item":
-                        EffectHandler.ApplyGiveItemByName(actorId, taiwuId, Str("item"), Math.Max(1, Int("amount", 1)),
-                            (n, m) => finish(n > 0, m), targetId == taiwuId ? 0 : targetId, operationId);
-                        break;
-                    case "gift_silver":
-                        EffectHandler.ApplyGiveSilver(actorId, taiwuId, Math.Max(1, Int("amount", 1)),
-                            (n, m) => finish(n > 0, m), targetId == taiwuId ? 0 : targetId, operationId);
-                        break;
-                    case "steal":
-                        EffectHandler.ApplySteal(actorId, targetId, Str("item"), Math.Max(1, Int("amount", 1)),
-                            (ok, n, real, m, detected, chance) => finish(ok, m), operationId);
-                        break;
-                    case "poison":
-                        EffectHandler.ApplyMonthlyPoison(actorId, targetId, Str("poison_type"), finish, operationId);
-                        break;
-                    case "relate":
-                    {
-                        string kind = Str("kind").Trim().ToLowerInvariant();
-                        if (!IsRelationKind(kind))
-                        { onDone?.Invoke("恢复派发关系类型无效"); yield break; }
-                        EffectHandler.ApplyRelateNpc(actorId, targetId, kind, finish, operationId);
-                        break;
-                    }
-                    case "enmity":
-                        EffectHandler.ApplyEnmity(actorId, targetId, Bool("make", true), finish, operationId);
-                        break;
-                    case "kill":
-                        EffectHandler.ApplyMonthlyKill(actorId, targetId, finish, operationId);
-                        break;
-                    case "capture":
-                        EffectHandler.ApplyMonthlyCapture(actorId, targetId, finish, operationId);
-                        break;
-                    case "add_feature":
-                        EffectHandler.ApplyAddFeature(targetId, Str("feature"), finish, operationId);
-                        break;
-                    case "flip_practice":
-                        EffectHandler.ApplyFlipPractice(targetId, Str("skill"),
-                            (ok, name, before, after, count, message) => finish(ok, message), operationId);
-                        break;
-                    case "heal":
-                        EffectHandler.ApplyHeal(actorId, targetId, finish, operationId);
-                        break;
-                    case "detox":
-                        EffectHandler.ApplyDetox(actorId, targetId, finish, operationId);
-                        break;
-                    case "regulate_breath":
-                        EffectHandler.ApplyRegulateBreath(actorId, targetId, finish, operationId);
-                        break;
-                    case "dissolve_relation":
-                    {
-                        string relation = Str("relation").Trim().ToLowerInvariant();
-                        if (!IsDissolvableRelation(relation))
-                        { onDone?.Invoke("恢复派发解除关系类型无效"); yield break; }
-                        EffectHandler.ApplyDissolveRelation(actorId, taiwuId, relation, targetId,
-                            finish, operationId);
-                        break;
-                    }
-                    case "barter":
-                        EffectHandler.ApplyBarter(actorId, targetId, Str("give_item"), Math.Max(1, Int("give_amount", 1)),
-                            Str("receive_item"), Math.Max(1, Int("receive_amount", 1)),
-                            (ok, ga, ra, gn, rn, message) => finish(ok, message), operationId);
-                        break;
-                    case "write_book":
-                        if (!IsSkillKind(Str("type")))
-                        { onDone?.Invoke("恢复派发写书类型无效"); yield break; }
-                        EffectHandler.ApplyWriteBook(actorId, taiwuId, Str("type"), (short)Int("template_id", -1),
-                            (ok, book, lost) => finish(ok, book), targetId == taiwuId ? 0 : targetId, operationId);
-                        break;
-                    case "teach":
-                        if (!IsSkillKind(Str("type")))
-                        { onDone?.Invoke("恢复派发亲授类型无效"); yield break; }
-                        if (Str("type") == "life")
-                            EffectHandler.ApplyTeachLifeSkill(actorId, taiwuId, (short)Int("template_id", -1),
-                                finish, targetId, operationId);
-                        else
-                            EffectHandler.ApplyTeachSkillId(actorId, taiwuId, (short)Int("template_id", -1),
-                                finish, targetId, operationId);
-                        break;
-                    case "tell_secret":
-                        EffectHandler.ApplyDiscloseSecret((SecretInformationId)Int("secret_id", -1),
-                            actorId, targetId, finish, operationId);
-                        break;
-                    case "use_item":
-                    {
-                        string item = Str("item").Trim();
-                        if (item.Length == 0)
-                        { onDone?.Invoke("恢复派发使用物品参数无效"); yield break; }
-                        EffectHandler.ApplyNpcUseItem(actorId, item,
-                            (ok, name, kind, amount, before, after, message) => finish(ok, message),
-                            operationId);
-                        break;
-                    }
-                    case "change_equipment":
-                    {
-                        string action = Str("action").Trim().ToLowerInvariant();
-                        string part = Str("part").Trim().ToLowerInvariant();
-                        string item = Str("item").Trim();
-                        if (action != "on" && action != "off"
-                            || action == "off" && !IsEquipmentPart(part)
-                            || action == "on" && item.Length == 0)
-                        {
-                            onDone?.Invoke("恢复派发换装参数无效");
-                            yield break;
-                        }
-                        if (action == "off")
-                            EffectHandler.ApplyEquipTakeOff(actorId, part, finish, operationId);
-                        else EffectHandler.ApplyEquipByName(actorId, item, finish, operationId);
-                        break;
-                    }
-                    case "sect_support":
-                        EffectHandler.ApplySectSupport(actorId, finish, operationId);
-                        break;
-                    case "adjust_favor":
-                        if (targetId == taiwuId)
-                            EffectHandler.ApplyFavor(actorId, taiwuId, Int("delta"), finish, operationId);
-                        else EffectHandler.ApplyThirdPartyFavor(actorId, targetId, Int("delta"), finish, operationId);
-                        break;
-                    case "adjust_mood":
-                        EffectHandler.ApplyCharacterHappiness(targetId, Int("delta"), finish, operationId);
-                        break;
-                    case "adjust_fame":
-                        EffectHandler.ApplyCharacterFame(targetId, Int("delta"), finish, operationId);
-                        break;
-                    case "spend_night":
-                        EffectHandler.ApplySpendNightBetween(actorId, targetId, taiwuId, finish, operationId);
-                        break;
-                    case "matchmake":
-                        EffectHandler.ApplyMatchmake(actorId, targetId, finish, operationId);
-                        break;
-                    case "set_relation":
-                    {
-                        string action = Str("action").Trim().ToLowerInvariant();
-                        switch (action)
-                        {
-                            case "befriend": EffectHandler.ApplyRelation(actorId, taiwuId, "best_friend", finish, operationId); break;
-                            case "swear_sibling": EffectHandler.ApplyRelation(actorId, taiwuId, "sworn_sibling", finish, operationId); break;
-                            case "apprentice": EffectHandler.ApplyRelation(actorId, taiwuId, "apprentice", finish, operationId); break;
-                            case "take_disciple": EffectHandler.ApplyRelation(actorId, taiwuId, "take_disciple", finish, operationId); break;
-                            case "lover": case "spouse": EffectHandler.ApplyRelation(actorId, taiwuId, action, finish, operationId); break;
-                            case "recognize": EffectHandler.ApplyRecognizeTaiwu(actorId, finish, operationId); break;
-                            case "follow": EffectHandler.ApplyFollow(actorId, true, finish, operationId); break;
-                            default: onDone?.Invoke("恢复派发关系动作无效"); yield break;
-                        }
-                        break;
-                    }
-                    default:
-                        onDone?.Invoke("不支持的恢复工具:" + (toolName ?? "unknown"));
-                        yield break;
-                }
-            }
-            catch (Exception e)
-            {
-                onDone?.Invoke("恢复派发异常:" + e.GetType().Name);
-                yield break;
-            }
-            float deadline = Time.unscaledTime + MutationCallbackTimeoutSeconds;
-            while (!finished && Time.unscaledTime < deadline) yield return null;
-            onDone?.Invoke(finished ? result : "UNKNOWN:恢复派发 callback 超时");
-        }
-
-        private static SortedSet<int> ParsePhysicalEndpoints(string csv)
-        {
-            if (string.IsNullOrWhiteSpace(csv)) return null;
-            var endpoints = new SortedSet<int>();
-            foreach (string raw in csv.Split(','))
-            {
-                int id;
-                if (!int.TryParse((raw ?? string.Empty).Trim(), out id) || id <= 0 || !endpoints.Add(id))
-                    return null;
-            }
-            return endpoints;
-        }
-
-        private static bool RecoverCompanionBatchProjections(string path, int generation, int taiwuId)
-        {
-            MutationJournalDocument snapshot;
-            lock (JournalIo) snapshot = LoadMutationJournal(path);
-            if (snapshot == null || snapshot.Entries == null) return false;
-            var batches = new Dictionary<string, List<MutationJournalRecord>>(StringComparer.Ordinal);
-            var dirtyBatchIds = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var entry in snapshot.Entries)
-                if (entry != null && entry.WorldId == WorldLifecycle.WorldId && entry.TaiwuId == taiwuId
-                    && !string.IsNullOrWhiteSpace(entry.BatchId) && !entry.ProjectionCommitted)
-                    dirtyBatchIds.Add(entry.BatchId);
-            foreach (var entry in snapshot.Entries)
-            {
-                if (entry == null || string.IsNullOrWhiteSpace(entry.BatchId) || !dirtyBatchIds.Contains(entry.BatchId)) continue;
-                List<MutationJournalRecord> list;
-                if (!batches.TryGetValue(entry.BatchId, out list)) batches[entry.BatchId] = list = new List<MutationJournalRecord>();
-                list.Add(entry);
-            }
-            foreach (var pair in batches)
-            {
-                var entries = pair.Value;
-                entries.Sort((x, y) => x.StepIndex.CompareTo(y.StepIndex));
-                var first = entries[0];
-                if (first.WorldId != WorldLifecycle.WorldId || first.TaiwuId <= 0 || first.NpcId <= 0)
-                    return false;
-                foreach (var entry in entries)
-                    if (entry.WorldId != first.WorldId || entry.TaiwuId != first.TaiwuId
-                        || entry.NpcId != first.NpcId || entry.WorldDate != first.WorldDate
-                        || entry.ConversationClearEpoch != first.ConversationClearEpoch)
-                        return false;
-                string projectionText = null;
-                foreach (var entry in entries)
-                    if (!entry.ProjectionCommitted && !string.IsNullOrWhiteSpace(entry.ProjectionText))
-                    { projectionText = entry.ProjectionText; break; }
-                var outcomes = new List<string>();
-                for (int i = entries.Count - 1; i >= 0; i--)
-                {
-                    if (string.IsNullOrWhiteSpace(entries[i].ProjectionOutcomesJson)) continue;
-                    try
-                    {
-                        var saved = JArray.Parse(entries[i].ProjectionOutcomesJson);
-                        foreach (var token in saved)
-                        {
-                            string line = token == null ? null : token.ToString();
-                            if (!string.IsNullOrWhiteSpace(line) && !outcomes.Contains(line)) outcomes.Add(line);
-                        }
-                    }
-                    catch { return false; }
-                    break;
-                }
-                foreach (var entry in entries)
-                {
-                    string line = entry.OutcomeText;
-                    if (string.IsNullOrWhiteSpace(line)) line = RecoveredCompanionOutcomeLine(entry);
-                    if (!string.IsNullOrWhiteSpace(line) && !outcomes.Contains(line)) outcomes.Add(line);
-                }
-                var receipts = new List<StoryProjectionReceipt>();
-                for (int i = entries.Count - 1; i >= 0; i--)
-                {
-                    string receiptsJson = entries[i].ProjectionReceiptsJson;
-                    if (string.IsNullOrWhiteSpace(receiptsJson)) continue;
-                    if (!ProjectionReceiptsShapeValid(receiptsJson)) return false;
-                    try
-                    {
-                        var saved = JsonConvert.DeserializeObject<List<StoryProjectionReceipt>>(receiptsJson);
-                        if (saved != null) receipts.AddRange(saved);
-                    }
-                    catch { return false; }
-                    break;
-                }
-                if (!TryCollectBatchProjectionAuthority(entries, out HashSet<int> authorizedParticipants))
-                    return false;
-                if (!CompanionProjectionReceiptsMatchJournal(entries, outcomes, receipts,
-                    authorizedParticipants))
-                {
-                    Debug.LogWarning("[JHYL_COMPANION_RECOVERY_RECEIPT_REJECTED] batch=" + pair.Key
-                        + " durable_projection=non_factual_fallback");
-                    receipts.Clear();
-                }
-                if (string.IsNullOrWhiteSpace(projectionText))
-                {
-                    var result = new CompanionMonthlyResult
-                    {
-                        NpcId = first.NpcId,
-                        Name = string.IsNullOrWhiteSpace(first.ActorName) ? ("#" + first.NpcId) : first.ActorName,
-                        LocationText = first.ActorLocation,
-                    };
-                    result.Outcomes.AddRange(outcomes);
-                    result.StoryReceipts.AddRange(receipts);
-                    foreach (int id in authorizedParticipants) result.AuthorizedParticipantIds.Add(id);
-                    result.Summary = outcomes.Count == 0 ? "主动行事回执仍未知" : Trim(outcomes[0], 42);
-                    result.Detail = DeterministicStory(result, null);
-                    projectionText = "【主动行事】" + result.Detail;
-                }
-                string outcomesJson = JsonConvert.SerializeObject(outcomes, Formatting.None);
-                if (!CommitCompanionActorOutcomeMemory(first.TaiwuId, first.NpcId,
-                    first.WorldDate, pair.Key, outcomes)
-                    || !CommitCompanionTargetAwareness(first.TaiwuId, first.WorldDate, receipts))
-                    return false;
-                if (!PrepareCompanionBatchProjection(path, pair.Key, projectionText, outcomesJson)) return false;
-
-                long currentClearEpoch = TalkOrchestrator.CaptureConversationClearEpoch(first.TaiwuId, first.NpcId);
-                bool userCleared = currentClearEpoch != first.ConversationClearEpoch;
-                if (!userCleared)
-                {
-                    if (!WorldLifecycle.IsSameWorld(generation)) return false;
-                    bool already = ConversationContainsExactNpcProjection(first.TaiwuId, first.NpcId,
-                        first.WorldDate, projectionText);
-                    if (!already && !TalkOrchestrator.AppendNpcLineIfCurrent(first.TaiwuId, first.NpcId,
-                        projectionText, first.WorldDate, generation, first.ConversationClearEpoch,
-                        first.ActorName)) return false;
-                    if (already && !TalkOrchestrator.TryUpdateExistingConversationNameIfCurrent(
-                        first.TaiwuId, first.NpcId, first.ActorName, generation)) return false;
-                }
-                else
-                    Debug.Log("[江湖有灵] 同道终态投影恢复遇到用户已清空会话，保留 journal 审计但不复活旧聊天 batch=" + pair.Key);
-                if (!CommitCompanionBatchProjection(path, pair.Key)) return false;
-                AcknowledgeProjectedCompanionBatch(path, pair.Key);
-            }
-            return true;
-        }
-
-        private static string RecoveredCompanionOutcomeLine(MutationJournalRecord entry)
-        {
-            if (entry == null) return null;
-            string tool = string.IsNullOrWhiteSpace(entry.ToolName) ? "unknown" : entry.ToolName;
-            if (entry.Status == "succeeded")
-                return "成功:工具 " + tool + " 已由后端终态回执确认";
-            if (entry.Status == "unknown")
-                return "未知:工具 " + tool + " 的最终结果无法判定"
-                    + (string.IsNullOrWhiteSpace(entry.Message) ? "" : (":" + entry.Message));
-            if (entry.Status == "prepared" || entry.Status == "pending")
-                return "未知:工具 " + tool + " 的后端回执尚未确认；不会无界重试";
-            return "失败:工具 " + tool + " 未成"
-                + (string.IsNullOrWhiteSpace(entry.Message) ? "" : (":" + entry.Message));
-        }
-
         private static void ReportMutationUnknown(List<string> outcomes, string toolName, string reason,
             Action<string> onResult)
         {
@@ -4014,15 +2144,6 @@ namespace JianghuYouling
                 return false;
             }
             AddOutcome(outcomes, succeeded, text);
-            string line = outcomes != null && outcomes.Count > 0 ? outcomes[outcomes.Count - 1] : null;
-            if (lease == null || !lease.PersistOutcomeText(line, succeeded ? projectionAsset : null))
-            {
-                if (lease != null && TryInvalidateBatch(lease.BatchEpoch))
-                    RequestGuardRelease(lease.BatchEpoch, "step_projection_checkpoint_failed");
-                ReportMutationUnknown(outcomes, lease == null ? "unknown" : lease.ToolName,
-                    "后端终态已确认，但完整批次投影 checkpoint 失败；停止后续行动并等待崩溃恢复", onResult);
-                return false;
-            }
             onResult?.Invoke((succeeded ? "OK:" : "未成:") + text);
             return true;
         }
@@ -4031,8 +2152,6 @@ namespace JianghuYouling
             string toolName, string reason, Action<string> onResult)
         {
             ReportMutationUnknown(outcomes, toolName, reason, onResult);
-            string line = outcomes != null && outcomes.Count > 0 ? outcomes[outcomes.Count - 1] : null;
-            if (lease != null) lease.PersistOutcomeText(line, null);
         }
 
         private static void ReportReceivedMutationUnknown(MutationLease lease, List<string> outcomes,
@@ -4042,7 +2161,6 @@ namespace JianghuYouling
             {
                 lock (MutationGate)
                     if (!string.IsNullOrWhiteSpace(lease.MutationKey)) UnknownMutationQuarantine.Add(lease.MutationKey);
-                UpdateMutationJournal(lease.JournalPath, lease.MutationKey, lease.OperationId, lease.ToolName, "unknown", 0);
                 if (TryInvalidateBatch(lease.BatchEpoch)) RequestGuardRelease(lease.BatchEpoch, "operation_receipt_unknown");
             }
             ReportMutationUnknown(outcomes, toolName, string.IsNullOrWhiteSpace(message)
@@ -4066,75 +2184,23 @@ namespace JianghuYouling
             catch { return false; }
         }
 
-        private static void CompleteMutationLease(int batchEpoch)
-        {
-            bool released = false;
-            int remaining;
-            string reason = null;
-            lock (MutationGate)
-            {
-                int count;
-                if (MutationInflightByEpoch.TryGetValue(batchEpoch, out count))
-                {
-                    if (count <= 1) MutationInflightByEpoch.Remove(batchEpoch);
-                    else MutationInflightByEpoch[batchEpoch] = count - 1;
-                }
-                remaining = TotalInflightUnsafe();
-                if (_guardReleasePending && remaining == 0)
-                {
-                    reason = _guardReleaseReason;
-                    _guardReleasePending = false;
-                    _guardReleaseReason = null;
-                    _running = false;
-                    released = true;
-                }
-            }
-            if (released) DisposeBatchRequests(batchEpoch);
-            Debug.Log("[JHYL_COMPANION_MUTATION_LEASE] complete epoch=" + batchEpoch
-                + " remaining=" + remaining + " guardReleased=" + released + " reason=" + (reason ?? "-"));
-        }
-
         private static void RequestGuardRelease(int batchEpoch, string reason)
         {
-            int remaining;
-            bool released;
-            bool invalidated = false;
+            CancellationTokenSource cancellation;
             lock (MutationGate)
             {
-                _guardReleasePending = true;
-                _guardReleaseReason = reason;
-                remaining = TotalInflightUnsafe();
-                // Defensive fail-closed path: a nominal completion should have no mutation
-                // outstanding. If it does (for example an unexpected coroutine exception),
-                // invalidate before retaining the guard so no sibling continuation can dispatch.
-                if (remaining > 0 && batchEpoch == _runEpoch)
-                {
-                    unchecked { _runEpoch++; }
-                    invalidated = true;
-                }
-                released = remaining == 0;
-                if (released)
-                {
-                    _guardReleasePending = false;
-                    _guardReleaseReason = null;
-                    _running = false;
-                }
+                // A late callback from an ended batch must not release the new batch.
+                if (_runCancellationEpoch != batchEpoch) return;
+                _runStopState?.Stop(reason);
+                if (_runEpoch == batchEpoch) unchecked { _runEpoch++; }
+                cancellation = _runCancellation;
+                _runCancellation = null;
+                _runCancellationEpoch = 0;
+                _running = false;
             }
-            if (invalidated) CancelBatchRequests(batchEpoch);
-            if (released) DisposeBatchRequests(batchEpoch);
-            if (released)
-                Debug.Log("[JHYL_COMPANION_MUTATION_FENCE] released epoch=" + batchEpoch + " reason=" + reason);
-            else
-                Debug.LogWarning("[JHYL_COMPANION_MUTATION_FENCE] retained epoch=" + batchEpoch
-                    + " inflight=" + remaining + " reason=" + reason
-                    + "; later monthly batches remain disabled until callbacks arrive or bounded unknown watchdogs expire");
-        }
-
-        private static int TotalInflightUnsafe()
-        {
-            int total = 0;
-            foreach (var pair in MutationInflightByEpoch) total += Math.Max(0, pair.Value);
-            return total;
+            try { cancellation?.Cancel(); } catch (ObjectDisposedException) { }
+            cancellation?.Dispose();
+            Debug.Log("[JHYL_COMPANION_BATCH_ENDED] epoch=" + batchEpoch + " reason=" + reason);
         }
 
         private static bool RunIsCurrent(int batchEpoch, int generation, int taiwuId, int npcId,
@@ -4769,23 +2835,12 @@ namespace JianghuYouling
         private static bool ToolResultNotExecuted(string s)
             => !string.IsNullOrWhiteSpace(s) && s.TrimStart().StartsWith("未执行：", StringComparison.Ordinal);
 
-        private static string ReadMutationFailureCode(string journalPath, string operationId)
+        private static string ReadMutationFailureCode(string operationId)
         {
-            // Export the typed error, not a result paragraph that can contain private dialogue.
             if (string.IsNullOrWhiteSpace(operationId)) return "local_action_rejected";
-            try
-            {
-                lock (JournalIo)
-                {
-                    var journal = LoadMutationJournal(journalPath);
-                    if (journal?.Entries != null)
-                        foreach (var entry in journal.Entries)
-                            if (entry != null && entry.OperationId == operationId)
-                                return string.IsNullOrWhiteSpace(entry.Code) ? entry.Status : entry.Code;
-                }
-            }
-            catch { }
-            return "operation_receipt_unavailable";
+            lock (MutationGate)
+                return OperationFailureCodes.TryGetValue(operationId, out string code)
+                    ? code : "operation_receipt_unavailable";
         }
 
         private static string SanitizeTrajectoryReason(string value)
@@ -5306,15 +3361,6 @@ namespace JianghuYouling
                         AddStoryReceipt(storyReceipts, "remember",
                             OperationId.FromStableKey("companion-local-story|" + WorldLifecycle.WorldId + "|" + batchId + "|" + stepIndex + "|remember"),
                             snap.NpcId, snap.NpcId, snap.Name, snap.Name, "", snap.Name + "记住了此事");
-                        // remember 是本地副作用，不会生成自己的后端 operation journal。必须在返回成功前
-                        // 把它并入本批已有的 durable 投影 checkpoint，避免协程下一帧前退出时只留下前序动作。
-                        if (!CheckpointCompanionBatchOutcomes(MutationJournalPath(WorldLifecycle.WorldId), batchId,
-                            outcomes, storyReceipts))
-                        {
-                            AddOutcome(outcomes, false, "记忆已写入，但完整批次投影 checkpoint 失败");
-                            onResult("UNKNOWN:记忆已写入，但完整批次投影尚未可靠提交");
-                            yield break;
-                        }
                         onResult("OK:已写入记忆");
                     }
                     catch (OperationCanceledException) { onResult("未成:存档或聊天记录已切换"); }
@@ -5439,7 +3485,7 @@ namespace JianghuYouling
                     int[] actual = { -1 }; string[] msg = { null };
                     if (!Current()) { onResult("未成:存档或聊天记录已切换"); yield break; }
                     var lease = TryBeginToolMutationLease(batchEpoch, Current, snap, scene, name, a, "target", target,
-                        outcomes, onResult, batchId, stepIndex, conversationClearEpoch, onOperationPrepared);
+                        outcomes, onResult, onOperationPrepared);
                     if (lease == null) yield break;
                     try
                     {
@@ -5471,7 +3517,7 @@ namespace JianghuYouling
                     int[] actual = { -1 }; string[] msg = { null };
                     if (!Current()) { onResult("未成:存档或聊天记录已切换"); yield break; }
                     var lease = TryBeginToolMutationLease(batchEpoch, Current, snap, scene, name, a, "target", target,
-                        outcomes, onResult, batchId, stepIndex, conversationClearEpoch, onOperationPrepared);
+                        outcomes, onResult, onOperationPrepared);
                     if (lease == null) yield break;
                     try
                     {
@@ -5517,7 +3563,7 @@ namespace JianghuYouling
                     if (!TryClaimResolvedDestructiveStep(executionArbiter, name, snap, victim,
                         outcomes, onResult, out string claimKey, out bool claimWasNew)) yield break;
                     var lease = TryBeginToolMutationLease(batchEpoch, Current, snap, scene, name, a, "victim", victim,
-                        outcomes, onResult, batchId, stepIndex, conversationClearEpoch, onOperationPrepared);
+                        outcomes, onResult, onOperationPrepared);
                     if (lease == null)
                     {
                         if (claimWasNew) executionArbiter?.ReleaseUncommittedClaim(claimKey, snap.NpcId);
@@ -5565,7 +3611,7 @@ namespace JianghuYouling
                     if (!TryClaimResolvedDestructiveStep(executionArbiter, name, snap, target,
                         outcomes, onResult, out string claimKey, out bool claimWasNew)) yield break;
                     var lease = TryBeginToolMutationLease(batchEpoch, Current, snap, scene, name, a, "target", target,
-                        outcomes, onResult, batchId, stepIndex, conversationClearEpoch, onOperationPrepared);
+                        outcomes, onResult, onOperationPrepared);
                     if (lease == null)
                     {
                         if (claimWasNew) executionArbiter?.ReleaseUncommittedClaim(claimKey, snap.NpcId);
@@ -5643,7 +3689,7 @@ namespace JianghuYouling
                     if (!TryClaimResolvedDestructiveStep(executionArbiter, name, snap, target,
                         outcomes, onResult, out string claimKey, out bool claimWasNew)) yield break;
                     var lease = TryBeginToolMutationLease(batchEpoch, Current, snap, scene, name, a, "target", target,
-                        outcomes, onResult, batchId, stepIndex, conversationClearEpoch, onOperationPrepared);
+                        outcomes, onResult, onOperationPrepared);
                     if (lease == null)
                     {
                         if (claimWasNew) executionArbiter?.ReleaseUncommittedClaim(claimKey, snap.NpcId);
@@ -5691,7 +3737,7 @@ namespace JianghuYouling
                     int[] state = { -1 }; string[] msg = { null };
                     if (!Current()) { onResult("未成:存档或聊天记录已切换"); yield break; }
                     var lease = TryBeginToolMutationLease(batchEpoch, Current, snap, scene, name, a, "person", person,
-                        outcomes, onResult, batchId, stepIndex, conversationClearEpoch, onOperationPrepared);
+                        outcomes, onResult, onOperationPrepared);
                     if (lease == null) yield break;
                     try
                     {
@@ -5722,7 +3768,7 @@ namespace JianghuYouling
                     int[] state = { -1 }, count = { 0 }; string[] real = { null }, before = { null }, after = { null }, msg = { null };
                     if (!Current()) { onResult("未成:存档或聊天记录已切换"); yield break; }
                     var lease = TryBeginToolMutationLease(batchEpoch, Current, snap, scene, name, a, "person", person,
-                        outcomes, onResult, batchId, stepIndex, conversationClearEpoch, onOperationPrepared);
+                        outcomes, onResult, onOperationPrepared);
                     if (lease == null) yield break;
                     try
                     {
@@ -5751,8 +3797,7 @@ namespace JianghuYouling
                     int[] state = { -1 }, beforePages = { 0 }, afterPages = { 0 };
                     string[] real = { null }, direction = { null }, msg = { null };
                     var lease = TryBeginToolMutationLease(batchEpoch, Current, snap, scene,
-                        name, a, null, snap.NpcId, outcomes, onResult, batchId,
-                        stepIndex, conversationClearEpoch, onOperationPrepared);
+                        name, a, null, snap.NpcId, outcomes, onResult, onOperationPrepared);
                     if (lease == null) yield break;
                     try
                     {
@@ -5800,8 +3845,7 @@ namespace JianghuYouling
                     int[] state = { -1 }, beforePages = { 0 }, afterPages = { 0 };
                     string[] real = { null }, kind = { null }, msg = { null };
                     var lease = TryBeginToolMutationLease(batchEpoch, Current, snap, scene,
-                        name, a, null, snap.NpcId, outcomes, onResult, batchId,
-                        stepIndex, conversationClearEpoch, onOperationPrepared);
+                        name, a, null, snap.NpcId, outcomes, onResult, onOperationPrepared);
                     if (lease == null) yield break;
                     try
                     {
@@ -5848,8 +3892,7 @@ namespace JianghuYouling
                     int[] state = { -1 }, amount = { 0 }, before = { 0 }, after = { 0 };
                     string[] real = { null }, kind = { null }, msg = { null };
                     var lease = TryBeginToolMutationLease(batchEpoch, Current, snap, scene,
-                        name, a, null, snap.NpcId, outcomes, onResult, batchId,
-                        stepIndex, conversationClearEpoch, onOperationPrepared);
+                        name, a, null, snap.NpcId, outcomes, onResult, onOperationPrepared);
                     if (lease == null) yield break;
                     try
                     {
@@ -6231,7 +4274,7 @@ namespace JianghuYouling
             }
             int[] state = { -1 }; string[] message = { null };
             var lease = TryBeginToolMutationLease(batchEpoch, Current, snap, scene, tool, args,
-                entityField, targetId, outcomes, onResult, batchId, stepIndex, conversationClearEpoch,
+                entityField, targetId, outcomes, onResult,
                 onOperationPrepared);
             if (lease == null) yield break;
             try
@@ -6481,37 +4524,6 @@ namespace JianghuYouling
             }
         }
 
-        private static bool ExpandBatchProjectionAuthority(string path, string batchId, NpcSnapshot snap,
-            CompanionSceneContext scene)
-        {
-            if (string.IsNullOrWhiteSpace(path) || string.IsNullOrWhiteSpace(batchId)
-                || snap == null || scene == null) return false;
-            var expanded = new SortedSet<int>();
-            PopulateAuthorizedParticipants(expanded, snap, scene);
-            string expandedJson = JsonConvert.SerializeObject(expanded, Formatting.None);
-            lock (JournalIo)
-            {
-                var doc = LoadMutationJournal(path);
-                if (doc == null || doc.Entries == null) return false;
-                bool changed = false;
-                foreach (MutationJournalRecord entry in doc.Entries)
-                {
-                    if (entry == null || !string.Equals(entry.BatchId, batchId, StringComparison.Ordinal)) continue;
-                    if (!TryParseProjectionParticipantIds(entry.ProjectionParticipantIdsJson,
-                        out HashSet<int> existing) || !existing.IsSubsetOf(expanded)
-                        || !expanded.Contains(entry.NpcId) || !expanded.Contains(entry.TaiwuId)
-                        || !expanded.Contains(entry.TargetId)) return false;
-                    if (existing.SetEquals(expanded)) continue;
-                    entry.ProjectionParticipantIdsJson = expandedJson;
-                    entry.UpdatedUtcTicks = DateTime.UtcNow.Ticks;
-                    changed = true;
-                }
-                if (!changed) return true;
-                doc.Revision++;
-                return SaveMutationJournalDocument(path, doc);
-            }
-        }
-
         private static IEnumerator ResolvePerson(NpcSnapshot snap, CompanionSceneContext scene, string raw,
             int defaultId, string defaultName, Func<bool> stillCurrent, Action<int, string> done)
         {
@@ -6638,18 +4650,6 @@ namespace JianghuYouling
                 default:
                     return false;
             }
-        }
-
-        // 已经完成正文投影，且后端回执已由 ACK outbox 接管（或本就没有后端回执）的
-        // 终态记录不再承担恢复职责。及时移除可避免历史月份把 journal 撑到 MB 级，导致
-        // 每一个过月行为都在 Unity 主线程同步序列化、校验并 fsync 三份巨大文件。
-        private static int PruneSettledMutationRecords(MutationJournalDocument doc)
-        {
-            if (doc?.Entries == null || doc.Entries.Count == 0) return 0;
-            return doc.Entries.RemoveAll(entry => entry != null
-                && IsTerminalMutationStatus(entry.Status, entry.Retryable)
-                && entry.ProjectionCommitted
-                && (!entry.BackendReceiptStored || entry.AckOutboxCommitted));
         }
 
         private static bool RequiresSameLocation(string toolName)
@@ -6867,39 +4867,31 @@ namespace JianghuYouling
         {
             if (!WorldLifecycle.IsSameWorld(generation)
                 || TalkOrchestrator.CaptureConversationClearEpoch(taiwuId, npcId) != conversationClearEpoch
-                || r == null || string.IsNullOrWhiteSpace(batchId)) return false;
-            // 同道过月只投影权威工具回执，不再保存模型正文；聊天历史仍保留
-            // 完整结果，供之后对话承接。
-            string authoritativeProjection = DeterministicStory(r, null);
+                || r == null) return false;
+            string text = "【主动行事】" + DeterministicStory(r, null);
             r.Detail = null;
-            string text = "【主动行事】" + authoritativeProjection;
-            string path = MutationJournalPath(WorldLifecycle.WorldId);
-            string outcomesJson = JsonConvert.SerializeObject(r.Outcomes ?? new List<string>(), Formatting.None);
-            bool hasJournalEntries;
-            if (!TryGetCompanionBatchJournalState(path, batchId, out hasJournalEntries)) return false;
-            if (!CommitCompanionActorOutcomeMemory(taiwuId, npcId, date, batchId, r.Outcomes)
-                || !CommitCompanionTargetAwareness(taiwuId, date, r.StoryReceipts)) return false;
-            if (hasJournalEntries && !PrepareCompanionBatchProjection(path, batchId, text, outcomesJson)) return false;
+            bool memorySaved = CommitCompanionActorOutcomeMemory(taiwuId, npcId, date, batchId, r.Outcomes);
+            bool targetSaved = CommitCompanionTargetAwareness(taiwuId, date, r.StoryReceipts);
+            bool chatSaved = false;
             try
             {
-                bool alreadyProjected = ConversationContainsExactNpcProjection(taiwuId, npcId, date, text);
-                List<string> successfulActions = SuccessfulOutcomeActions(r.Outcomes);
-                bool saved = alreadyProjected
-                    ? TalkOrchestrator.TryUpdateExistingConversationNameIfCurrent(
-                        taiwuId, npcId, r.Name, generation)
-                    : TalkOrchestrator.AppendNpcLineIfCurrent(taiwuId, npcId, text,
-                        date, generation, conversationClearEpoch, successfulActions, r.Outcomes, r.Name);
-                if (!saved || !WorldLifecycle.IsSameWorld(generation)
-                    || TalkOrchestrator.CaptureConversationClearEpoch(taiwuId, npcId) != conversationClearEpoch)
-                    return false;
-                if (hasJournalEntries)
-                {
-                    if (!CommitCompanionBatchProjection(path, batchId)) return false;
-                    AcknowledgeProjectedCompanionBatch(path, batchId);
-                }
-                return true;
+                chatSaved = TalkOrchestrator.AppendNpcLineIfCurrent(taiwuId, npcId, text,
+                    date, generation, conversationClearEpoch, SuccessfulOutcomeActions(r.Outcomes),
+                    r.Outcomes, r.Name);
             }
-            catch { return false; }
+            catch (Exception e)
+            {
+                Debug.LogWarning("[JHYL_COMPANION_RECORD_SAVE_FAILED] npc=" + npcId
+                    + " exception=" + e.GetType().Name);
+            }
+            if (!memorySaved || !targetSaved || !chatSaved)
+            {
+                r.Outcomes.Add("记录未完整保存：部分人物记忆或聊天文字写入失败；已执行的动作不会重试。");
+                Debug.LogWarning("[JHYL_COMPANION_RECORD_INCOMPLETE] npc=" + npcId
+                    + " actor_memory=" + memorySaved + " target_memory=" + targetSaved
+                    + " chat=" + chatSaved + " repair=false");
+            }
+            return true;
         }
 
         private static List<string> SuccessfulOutcomeActions(IList<string> outcomes)
@@ -6915,351 +4907,6 @@ namespace JianghuYouling
             }
             return result;
         }
-
-        private static bool TryGetCompanionBatchJournalState(string path, string batchId, out bool hasEntries)
-        {
-            hasEntries = false;
-            lock (JournalIo)
-            {
-                var doc = LoadMutationJournal(path);
-                if (doc == null || doc.Entries == null) return false;
-                foreach (var entry in doc.Entries)
-                    if (entry != null && entry.BatchId == batchId) { hasEntries = true; break; }
-                return true;
-            }
-        }
-
-        private static bool TryLoadProjectedCompanionBatch(string path, string batchId,
-            out CompanionMonthlyResult result)
-        {
-            result = null;
-            lock (JournalIo)
-            {
-                var doc = LoadMutationJournal(path);
-                if (doc == null || doc.Entries == null) return false;
-                MutationJournalRecord projected = null;
-                foreach (var entry in doc.Entries)
-                    if (entry != null && entry.BatchId == batchId && entry.ProjectionCommitted
-                        && !string.IsNullOrWhiteSpace(entry.ProjectionText))
-                    { projected = entry; break; }
-                if (projected == null) return false;
-                if (TalkOrchestrator.CaptureConversationClearEpoch(projected.TaiwuId, projected.NpcId)
-                    != projected.ConversationClearEpoch)
-                {
-                    // 清空聊天不允许重放副作用，但也不应把旧故事重新送回本月弹窗。
-                    result = null;
-                    return true;
-                }
-                result = new CompanionMonthlyResult
-                {
-                    NpcId = projected.NpcId,
-                    Name = string.IsNullOrWhiteSpace(projected.ActorName) ? ("#" + projected.NpcId) : projected.ActorName,
-                    LocationText = projected.ActorLocation,
-                    Detail = null,
-                };
-                if (!string.IsNullOrWhiteSpace(projected.ProjectionOutcomesJson))
-                    try
-                    {
-                        foreach (var token in JArray.Parse(projected.ProjectionOutcomesJson))
-                            if (token != null && !string.IsNullOrWhiteSpace(token.ToString())) result.Outcomes.Add(token.ToString());
-                    }
-                    catch { result = null; return false; }
-                result.Summary = result.Outcomes.Count > 0 ? Trim(result.Outcomes[0], 42) : Trim(result.Detail, 42);
-                return true;
-            }
-        }
-
-        private static IEnumerator ValidateProjectedCompanionBatchAuthority(string path, string batchId,
-            int generation, Func<bool> stillCurrent, Action<ProjectionAuthorityState> onDone)
-        {
-            var operationIds = new HashSet<string>(StringComparer.Ordinal);
-            uint worldId = 0;
-            int taiwuId = 0;
-            bool journalInvalid = false;
-            lock (JournalIo)
-            {
-                MutationJournalDocument doc = LoadMutationJournal(path);
-                if (doc == null || doc.Entries == null)
-                    journalInvalid = true;
-                else
-                    foreach (MutationJournalRecord entry in doc.Entries)
-                    {
-                        if (entry == null || entry.BatchId != batchId || !entry.ProjectionCommitted
-                            || entry.Status != "succeeded") continue;
-                        if (!OperationId.IsValid(entry.OperationId) || entry.WorldId == 0 || entry.TaiwuId <= 0)
-                        { journalInvalid = true; break; }
-                        if (worldId == 0) { worldId = entry.WorldId; taiwuId = entry.TaiwuId; }
-                        if (entry.WorldId != worldId || entry.TaiwuId != taiwuId)
-                        { journalInvalid = true; break; }
-                        operationIds.Add(entry.OperationId);
-                    }
-            }
-            if (journalInvalid)
-            {
-                onDone?.Invoke(ProjectionAuthorityState.Unavailable);
-                yield break;
-            }
-
-            foreach (string operationId in operationIds)
-            {
-                if (!WorldLifecycle.IsSameWorld(generation) || !PredicateIsCurrent(stillCurrent))
-                {
-                    onDone?.Invoke(ProjectionAuthorityState.Unavailable);
-                    yield break;
-                }
-                ToolOutcome outcome = null;
-                bool completed = false;
-                EffectHandler.QueryOperation(worldId, taiwuId, operationId,
-                    value => { outcome = value; completed = true; });
-                float deadline = Time.unscaledTime + OperationReconcileWaitSeconds;
-                while (!completed && Time.unscaledTime < deadline
-                    && WorldLifecycle.IsSameWorld(generation) && PredicateIsCurrent(stillCurrent))
-                    yield return null;
-                if (!completed || outcome == null || !WorldLifecycle.IsSameWorld(generation)
-                    || !PredicateIsCurrent(stillCurrent))
-                {
-                    onDone?.Invoke(ProjectionAuthorityState.Unavailable);
-                    yield break;
-                }
-                if (IsOperationNotFound(outcome) || outcome.IsTerminal && !outcome.IsSucceeded)
-                {
-                    onDone?.Invoke(ProjectionAuthorityState.StaleAfterSaveRollback);
-                    yield break;
-                }
-                if (!outcome.IsSucceeded
-                    || !string.Equals(outcome.OperationId, operationId, StringComparison.Ordinal))
-                {
-                    onDone?.Invoke(ProjectionAuthorityState.Unavailable);
-                    yield break;
-                }
-            }
-            onDone?.Invoke(ProjectionAuthorityState.Current);
-        }
-
-        private static bool InvalidateStaleProjectedCompanionBatch(string path, string batchId, int date)
-        {
-            string projectionText = null;
-            var mutationKeys = new List<string>();
-            int taiwuId = 0;
-            int npcId = 0;
-            lock (JournalIo)
-            {
-                MutationJournalDocument doc = LoadMutationJournal(path);
-                if (doc == null || doc.Entries == null) return false;
-                bool found = false;
-                for (int i = doc.Entries.Count - 1; i >= 0; i--)
-                {
-                    MutationJournalRecord entry = doc.Entries[i];
-                    if (entry == null || entry.BatchId != batchId) continue;
-                    found = true;
-                    if (string.IsNullOrWhiteSpace(projectionText)
-                        && !string.IsNullOrWhiteSpace(entry.ProjectionText))
-                        projectionText = entry.ProjectionText;
-                    if (taiwuId <= 0) taiwuId = entry.TaiwuId;
-                    if (npcId <= 0) npcId = entry.NpcId;
-                    if (!string.IsNullOrWhiteSpace(entry.MutationKey)) mutationKeys.Add(entry.MutationKey);
-                    doc.Entries.RemoveAt(i);
-                }
-                if (!found) return true;
-                doc.Revision++;
-                if (!SaveMutationJournalDocument(path, doc)) return false;
-            }
-            lock (MutationGate)
-                foreach (string key in mutationKeys) UnknownMutationQuarantine.Remove(key);
-            if (!string.IsNullOrWhiteSpace(projectionText) && taiwuId > 0 && npcId > 0
-                && !TalkOrchestrator.RemoveExactNpcLineIfCurrent(taiwuId, npcId, projectionText, date))
-                return false;
-            return true;
-        }
-
-        private static bool CheckpointCompanionBatchOutcomes(string path, string batchId,
-            IList<string> outcomes, IList<StoryProjectionReceipt> receipts)
-        {
-            lock (JournalIo)
-            {
-                var doc = LoadMutationJournal(path);
-                if (doc == null || doc.Entries == null) return false;
-                bool found = false;
-                var batchEntries = new List<MutationJournalRecord>();
-                string json = JsonConvert.SerializeObject(outcomes ?? new List<string>(), Formatting.None);
-                string receiptsJson = JsonConvert.SerializeObject(receipts
-                    ?? new List<StoryProjectionReceipt>(), Formatting.None);
-                foreach (var entry in doc.Entries)
-                {
-                    if (entry == null || entry.BatchId != batchId) continue;
-                    found = true;
-                    batchEntries.Add(entry);
-                }
-                if (found)
-                {
-                    if (!TryCollectBatchProjectionAuthority(batchEntries, out HashSet<int> authority)
-                        || !CompanionProjectionReceiptsMatchJournal(batchEntries, outcomes, receipts, authority))
-                        return false;
-                }
-                foreach (var entry in batchEntries)
-                {
-                    entry.ProjectionOutcomesJson = json;
-                    entry.ProjectionReceiptsJson = receiptsJson;
-                    entry.UpdatedUtcTicks = DateTime.UtcNow.Ticks;
-                }
-                if (!found) return true; // 本轮只有本地前置失败，没有后端 mutation journal。
-                doc.Revision++;
-                return SaveMutationJournalDocument(path, doc);
-            }
-        }
-
-        private static bool ConversationContainsExactNpcProjection(int taiwuId, int npcId, int date, string text)
-        {
-            try
-            {
-                var turns = TalkOrchestrator.History(taiwuId, npcId);
-                if (turns == null) return false;
-                foreach (var turn in turns)
-                    if (turn != null && !turn.FromPlayer && !TalkTurnKinds.IsNative(turn) && turn.Date == date
-                        && string.Equals((turn.Text ?? "").Trim(), (text ?? "").Trim(), StringComparison.Ordinal))
-                        return true;
-            }
-            catch { }
-            return false;
-        }
-
-        private static bool PrepareCompanionBatchProjection(string path, string batchId, string projectionText,
-            string outcomesJson)
-        {
-            lock (JournalIo)
-            {
-                var doc = LoadMutationJournal(path);
-                if (doc == null || doc.Entries == null) return false;
-                bool found = false;
-                foreach (var entry in doc.Entries)
-                {
-                    if (entry == null || entry.BatchId != batchId) continue;
-                    found = true;
-                    entry.ProjectionText = projectionText;
-                    entry.ProjectionOutcomesJson = outcomesJson;
-                    entry.ProjectionCommitted = false;
-                    entry.UpdatedUtcTicks = DateTime.UtcNow.Ticks;
-                }
-                if (!found) return false;
-                doc.Revision++;
-                return SaveMutationJournalDocument(path, doc);
-            }
-        }
-
-        private static bool CommitCompanionBatchProjection(string path, string batchId)
-        {
-            lock (JournalIo)
-            {
-                var doc = LoadMutationJournal(path);
-                if (doc == null || doc.Entries == null) return false;
-                bool found = false;
-                foreach (var entry in doc.Entries)
-                {
-                    if (entry == null || entry.BatchId != batchId) continue;
-                    if (string.IsNullOrWhiteSpace(entry.ProjectionText)) return false;
-                    found = true;
-                    entry.ProjectionCommitted = true;
-                    entry.UpdatedUtcTicks = DateTime.UtcNow.Ticks;
-                }
-                if (!found) return false;
-                doc.Revision++;
-                return SaveMutationJournalDocument(path, doc);
-            }
-        }
-
-        private static void AcknowledgeProjectedCompanionBatch(string path, string batchId)
-        {
-            var requests = new List<MutationAckRequest>();
-            var operationIds = new HashSet<string>(StringComparer.Ordinal);
-            lock (JournalIo)
-            {
-                var doc = LoadMutationJournal(path);
-                if (doc == null || doc.Entries == null) return;
-                foreach (var entry in doc.Entries)
-                    if (entry != null && entry.BatchId == batchId && entry.ProjectionCommitted
-                        && IsAcknowledgeableMutation(entry)
-                        && entry.WorldId > 0 && entry.TaiwuId > 0 && OperationId.IsValid(entry.OperationId)
-                        && operationIds.Add(entry.OperationId))
-                        requests.Add(new MutationAckRequest
-                        {
-                            WorldId = entry.WorldId,
-                            TaiwuId = entry.TaiwuId,
-                            OperationId = entry.OperationId,
-                        });
-            }
-            foreach (var request in requests)
-            {
-                bool outboxCommitted = EffectHandler.AcknowledgeOperation(
-                    request.WorldId, request.TaiwuId, request.OperationId, ok =>
-                {
-                    if (!ok) Debug.LogWarning("[江湖有灵] 同道已投影终态 ACK 暂未完成 op=" + request.OperationId);
-                });
-                if (outboxCommitted && !MarkMutationAckOutboxCommitted(path, request.OperationId))
-                    Debug.LogWarning("[江湖有灵] 同道 ACK outbox 已接管，但 journal 接管标记暂未写回 op=" + request.OperationId);
-            }
-        }
-
-        private static void AcknowledgeAllProjectedCompanionOutcomes(string path)
-        {
-            var requests = new List<MutationAckRequest>();
-            var operationIds = new HashSet<string>(StringComparer.Ordinal);
-            lock (JournalIo)
-            {
-                var doc = LoadMutationJournal(path);
-                if (doc == null || doc.Entries == null) return;
-                foreach (var entry in doc.Entries)
-                    if (entry != null && entry.WorldId == WorldLifecycle.WorldId && entry.TaiwuId > 0
-                        && entry.ProjectionCommitted
-                        && IsAcknowledgeableMutation(entry)
-                        && OperationId.IsValid(entry.OperationId) && operationIds.Add(entry.OperationId))
-                        requests.Add(new MutationAckRequest
-                        {
-                            WorldId = entry.WorldId,
-                            TaiwuId = entry.TaiwuId,
-                            OperationId = entry.OperationId,
-                        });
-            }
-            foreach (var request in requests)
-            {
-                bool outboxCommitted = EffectHandler.AcknowledgeOperation(
-                    request.WorldId, request.TaiwuId, request.OperationId, ok =>
-                {
-                    if (!ok) Debug.LogWarning("[江湖有灵] 同道启动恢复 ACK 暂未完成 op=" + request.OperationId);
-                });
-                if (outboxCommitted && !MarkMutationAckOutboxCommitted(path, request.OperationId))
-                    Debug.LogWarning("[江湖有灵] 同道恢复 ACK outbox 已接管，但 journal 标记暂未写回 op=" + request.OperationId);
-            }
-        }
-
-        private static bool MarkMutationAckOutboxCommitted(string path, string operationId)
-        {
-            if (string.IsNullOrWhiteSpace(path) || !OperationId.IsValid(operationId)) return false;
-            lock (JournalIo)
-            {
-                var doc = LoadMutationJournal(path);
-                if (doc == null || doc.Entries == null) return false;
-                MutationJournalRecord found = null;
-                foreach (var entry in doc.Entries)
-                    if (entry != null && string.Equals(entry.OperationId, operationId, StringComparison.Ordinal))
-                    { found = entry; break; }
-                if (found == null) return false;
-                if (found.AckOutboxCommitted) return true;
-                found.AckOutboxCommitted = true;
-                found.UpdatedUtcTicks = DateTime.UtcNow.Ticks;
-                doc.Revision++;
-                return SaveMutationJournalDocument(path, doc);
-            }
-        }
-
-        private static bool IsTerminalMutationStatus(string status, bool retryable)
-            => status == "succeeded" || status == "failed" || status == "rejected" || status == "canceled"
-                || status == "unknown" && !retryable;
-
-        private static bool IsAcknowledgeableMutation(MutationJournalRecord entry)
-            => entry != null && IsTerminalMutationStatus(entry.Status, entry.Retryable)
-                && entry.BackendReceiptStored && !string.IsNullOrWhiteSpace(entry.Receipt)
-                && !entry.AckOutboxCommitted
-                && !string.Equals(entry.Code, "CANCELED_BEFORE_DISPATCH", StringComparison.Ordinal);
 
         private static IEnumerator RefreshActorPreflightState(string toolName, NpcSnapshot snap,
             Func<bool> stillCurrent)

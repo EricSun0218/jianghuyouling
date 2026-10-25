@@ -84,6 +84,7 @@ namespace JianghuYouling.Rpc
             public readonly bool AllowEarlierTaiwuInSameWorld;
             public readonly string ExpectedOperationKind;
             public readonly bool AllowUnpersistedStructuredResponse;
+            public Func<bool> MonthlyCurrent;
             public int Completed;
             public SerializableModData LastObserved;
 
@@ -160,8 +161,10 @@ namespace JianghuYouling.Rpc
                 catch { } // A diagnostic failure must never suppress the exactly-once callback.
                 try { Callback?.Invoke(response); }
                 catch (Exception e) { Debug.LogWarning("[江湖有灵] operation callback 异常:" + e.GetType().Name); }
+                if (MonthlyCurrent != null && IsTerminal(response) && IsJournaledMutationReceipt(response))
+                    MonthlyOperationReceipts.Acknowledge(WorldId, TaiwuId, OperationId);
                 // 由本客户端临时生成 id 的调用没有 durable 恢复者；回调已同步消费终态后即可 ACK，
-                // 让后端在容量需要时把完整回执压缩为防重墓碑。显式 stable id 必须由调用方
+                // 让后端在容量需要时把完整回执压缩为防重墓碑。非月度显式 stable id 必须由调用方
                 // 在自己的 journal 可靠落盘后再 ACK，绝不能在这里抢先确认。
                 if (AutoAcknowledge && IsTerminal(response) && IsJournaledMutationReceipt(response))
                     AcknowledgeExistingReceipt(WorldId, TaiwuId, OperationId, null);
@@ -221,6 +224,7 @@ namespace JianghuYouling.Rpc
         public static void DiscardPreparedOperation(string operationId)
         {
             if (!IsValidOperationId(operationId)) return;
+            MonthlyOperationReceipts.Forget(operationId);
             lock (GroupEnvelopeGate)
             {
                 OperationIdentityExpectations.Remove(operationId);
@@ -309,6 +313,7 @@ namespace JianghuYouling.Rpc
             var state = new CallState(method, operationId, parameter, generation, worldId, taiwuId,
                 completed, autoAcknowledge, requireStructuredMutationReceipt, false,
                 ExpectedMutationOperationKind(method, parameter), false);
+            if (!readOnlyRequest) state.MonthlyCurrent = MonthlyOperationReceipts.Take(operationId);
             MonoBehaviour host = TalkEntryHost.Instance;
             if (host == null) host = ConfigHost.Instance;
             if (host == null)
@@ -659,6 +664,15 @@ namespace JianghuYouling.Rpc
 
         private static IEnumerator Run(CallState state, float responseTimeoutSeconds)
         {
+            if (state.MonthlyCurrent != null)
+            {
+                if (!state.MonthlyCurrent())
+                {
+                    state.Complete(Outcome(false, "canceled", "monthly_run_ended", false,
+                        state.OperationId, "本月任务已经结束，动作未派发"));
+                    yield break;
+                }
+            }
             if (MonthlySettlement.IsAdvancingMonthForMonthlyWork())
             {
                 state.Complete(Outcome(false, "rejected", "native_month_advancing", false,
@@ -666,6 +680,13 @@ namespace JianghuYouling.Rpc
                 yield break;
             }
             Debug.Log("[江湖有灵] operation dispatch method=" + state.Method + " op=" + state.OperationId);
+            if (state.MonthlyCurrent != null
+                && !MonthlyOperationReceipts.Remember(state.WorldId, state.TaiwuId, state.OperationId))
+            {
+                state.Complete(Outcome(false, "rejected", "monthly_receipt_tracking_failed", false,
+                    state.OperationId, "无法保存回执清理编号，动作未派发"));
+                yield break;
+            }
             Send(state.Method, state.Parameter, state, state.Observe);
 
             float deadline = Time.unscaledTime + responseTimeoutSeconds;
@@ -714,7 +735,8 @@ namespace JianghuYouling.Rpc
                 string status, code; bool retryable;
                 ReadOutcome(queryResponse, out status, out code, out retryable);
                 // 未找到说明原请求可能未抵达后端；用同一 opId 最多补发一次，后端 ledger 保证不重复落地。
-                if (!resent && queryReturned && status == "unknown" && code == "operation_not_found")
+                if (state.MonthlyCurrent == null && !resent && queryReturned
+                    && status == "unknown" && code == "operation_not_found")
                 {
                     if (MonthlySettlement.IsAdvancingMonthForMonthlyWork())
                     {

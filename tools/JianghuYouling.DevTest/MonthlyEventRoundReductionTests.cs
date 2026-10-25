@@ -99,7 +99,8 @@ namespace JianghuYouling.DevTest
                 && !HasTool(moodOnlyAppearanceTurn, "event_appearance");
             Console.WriteLine("  纯心情不触发外貌工具="
                 + (moodOnlyAppearanceOk ? "PASS" : "FAIL")
-                + " calls=" + ToolNames(moodOnlyAppearanceTurn));
+                + " calls=" + ToolNames(moodOnlyAppearanceTurn)
+                + " request_error=" + RequestErrorClass(moodOnlyAppearanceTurn));
 
             bool appearanceAbsent = tools.All(tool => tool == null || tool.Name != "event_appearance");
             Console.WriteLine("  过月江湖事件工具面移除外貌变化=" + (appearanceAbsent ? "PASS" : "FAIL"));
@@ -155,6 +156,19 @@ namespace JianghuYouling.DevTest
                 if (call != null && string.Equals(call.Name, name, StringComparison.Ordinal))
                     return true;
             return false;
+        }
+
+        private static string RequestErrorClass(LlmToolResult result)
+        {
+            if (result == null) return "null-result";
+            if (result.Ok) return "none";
+            string error = result.Error ?? string.Empty;
+            string http = System.Text.RegularExpressions.Regex.Match(error, @"HTTP \d{3}").Value;
+            if (http.Length > 0) return http;
+            if (error.IndexOf("timeout", StringComparison.OrdinalIgnoreCase) >= 0
+                || error.IndexOf("timed out", StringComparison.OrdinalIgnoreCase) >= 0
+                || error.Contains("超时")) return "timeout";
+            return "request-failed";
         }
 
         private static string ToolNames(LlmToolResult result)

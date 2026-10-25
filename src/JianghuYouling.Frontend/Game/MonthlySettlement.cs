@@ -1,14 +1,10 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Threading;
-using System.Globalization;
-using System.Text;
 using FrameWork;                 // ArgumentBox
 using UnityEngine;
 using JianghuYouling.Core.Behavior;
 using JianghuYouling.Core.Memory;
-using JianghuYouling.Core.Persistence;
 using JianghuYouling.Effects;
 
 namespace JianghuYouling
@@ -25,95 +21,20 @@ namespace JianghuYouling
         private static readonly object IntentInflightGate = new object();
         private static readonly HashSet<string> IntentInflight = new HashSet<string>(StringComparer.Ordinal);
         private static GEvent.Callback _handler;
-        private static int _lastProcessedDate = -1;
+        private static readonly MonthlyRunQueue DigestQueue = new MonthlyRunQueue();
         private static bool _inited;
         private static bool _worldBaselineReady;
         private static bool _loggedFirstEvent;   // 诊断:首次收到月度状态事件时打一行,确认事件真的到达本 mod
-        private static int _processingDate = -1;
         private static bool _travelStopIssued;
         private static bool _monthAdvanceStopIssued;
-        private const int DigestRetryLimit = 2;
-        private const int MaxRecoveredQueuedMonths = 24;
         private const string NativeAdvanceStopReason =
             "因你在上一轮生成完成前又开始了下一次过月，上一轮尚未完成的江湖事件与主动行事已取消。";
         private const string TravelStopReason =
             "因太吾正在旅行，本月尚未完成的江湖事件与主动行事已停止；旅行结束后，下一次过月会正常恢复。";
 
-        private sealed class DigestWork
-        {
-            public int TaiwuId;
-            public int Date;
-            public int Attempts;
-        }
-
-        // Only one monthly digest may own the durable pending checkpoint at a time. Later
-        // months are kept in date order and begin only after the preceding completion marker
-        // is durable, so an older coroutine can never overwrite a newer month's recovery state.
-        private static readonly List<DigestWork> DigestQueue = new List<DigestWork>();
-
-        private sealed class DigestState
-        {
-            public bool Pending;
-            public int Date;
-            public int Attempts;
-        }
-
-        private static string DigestStatePath()
-            => Path.Combine(JianghuYoulingPaths.Events, "monthly_digest_state.txt");
-
-        private static bool ValidDigestState(string value)
-        {
-            if (!DurableSettingsStore.IsSingleLine(value, 128, false)) return false;
-            string[] parts = value.Split('|');
-            return parts.Length == 3 && (parts[0] == "pending" || parts[0] == "complete")
-                && int.TryParse(parts[1], NumberStyles.None, CultureInfo.InvariantCulture, out int date) && date >= 0
-                && int.TryParse(parts[2], NumberStyles.None, CultureInfo.InvariantCulture, out int attempts)
-                && attempts >= 0 && attempts <= DigestRetryLimit;
-        }
-
-        private static DigestState LoadDigestState()
-        {
-            try
-            {
-                if (!DurableSettingsStore.TryLoad(DigestStatePath(), DurableSettingsStore.Small,
-                    ValidDigestState, out string raw)) return null;
-                string[] parts = raw.Split('|');
-                return new DigestState
-                {
-                    Pending = parts[0] == "pending",
-                    Date = int.Parse(parts[1], CultureInfo.InvariantCulture),
-                    Attempts = int.Parse(parts[2], CultureInfo.InvariantCulture),
-                };
-            }
-            catch { return null; }
-        }
-
-        private static bool SaveDigestState(bool pending, int date, int attempts)
-            => SaveDigestStateAtPath(DigestStatePath(), pending, date, attempts);
-
-        private static bool SaveDigestStateAtPath(string path, bool pending, int date, int attempts)
-            => !string.IsNullOrWhiteSpace(path)
-            && DurableSettingsStore.Save(path, (pending ? "pending" : "complete") + "|"
-                + date.ToString(CultureInfo.InvariantCulture) + "|"
-                + Math.Max(0, Math.Min(DigestRetryLimit, attempts)).ToString(CultureInfo.InvariantCulture),
-                DurableSettingsStore.Small, ValidDigestState);
-
         private static bool DigestWorldIsCurrent(int generation, uint worldId)
             => WorldLifecycle.IsSameWorld(generation) && worldId > 0
                 && WorldLifecycle.WorldId == worldId;
-
-        internal static bool PruneTimelineAtOrAfter(int currentDate)
-        {
-            if (currentDate < 0) return false;
-            lock (DigestQueue)
-            {
-                DigestQueue.RemoveAll(work => work != null && work.Date >= currentDate);
-                if (_processingDate >= currentDate) _processingDate = -1;
-                DigestState state = LoadDigestState();
-                if (state == null || state.Date < currentDate) return true;
-                return DurableFileStore.TryDeleteAllArtifacts(DigestStatePath());
-            }
-        }
 
         public static void Initialize()
         {
@@ -123,15 +44,15 @@ namespace JianghuYouling
             try
             {
                 var bgd = SingletonObject.getInstance<BasicGameData>();
-                _lastProcessedDate = (bgd != null) ? bgd.CurrDate : -1;
+                DigestQueue.Reset(bgd != null ? bgd.CurrDate : -1);
                 _worldBaselineReady = WorldLifecycle.HasWorldIdentity;
             }
-            catch { _lastProcessedDate = -1; _worldBaselineReady = false; }
+            catch { DigestQueue.Reset(-1); _worldBaselineReady = false; }
 
             _handler = OnMonthStateChange;
             GEvent.Add(EEvents.OnAdvancingMonthStateChange, _handler);
             GEvent.Add(EEvents.OnSavingWorldStateChange, _handler);
-            Debug.Log("[江湖有灵] 过月结算已挂载(基线日期=" + _lastProcessedDate + ")");
+            Debug.Log("[江湖有灵] 过月结算已挂载(基线日期=" + DigestQueue.LastClaimedDate + ")");
         }
 
         public static void Shutdown()
@@ -147,50 +68,25 @@ namespace JianghuYouling
 
         public static void ResetForWorldReady()
         {
-            _processingDate = -1;
             _travelStopIssued = false;
             _monthAdvanceStopIssued = false;
-            DigestQueue.Clear();
             try
             {
                 var bgd = SingletonObject.getInstance<BasicGameData>();
-                _lastProcessedDate = bgd != null ? bgd.CurrDate : -1;
+                DigestQueue.Reset(bgd != null ? bgd.CurrDate : -1);
                 _worldBaselineReady = bgd != null && WorldLifecycle.HasWorldIdentity;
-                DigestState state = _worldBaselineReady ? LoadDigestState() : null;
-                if (state != null && state.Pending && state.Date <= _lastProcessedDate)
-                {
-                    int currentDate = _lastProcessedDate;
-                    _lastProcessedDate = state.Date - 1;
-                    ResumePendingDigest(bgd.TaiwuCharId, state.Date, state.Attempts);
-                    // If the player advanced again while the pending digest was still running,
-                    // reconstruct the lost in-memory queue from the authoritative current date.
-                    // Bound very old/corrupt gaps so loading a long-abandoned save cannot launch
-                    // an unbounded number of model jobs at once.
-                    int firstQueued = state.Date + 1;
-                    if ((long)currentDate - state.Date > MaxRecoveredQueuedMonths)
-                    {
-                        firstQueued = currentDate - MaxRecoveredQueuedMonths + 1;
-                        Debug.LogWarning("[JHYL_MONTHLY_DIGEST_RECOVERY_CAP] pending=" + state.Date
-                            + " current=" + currentDate + " keeping_latest=" + MaxRecoveredQueuedMonths);
-                    }
-                    for (int queuedDate = Math.Max(state.Date + 1, firstQueued);
-                        queuedDate <= currentDate; queuedDate++)
-                        TriggerMonthlyDigest(bgd.TaiwuCharId, queuedDate, 0);
-                }
             }
-            catch { _lastProcessedDate = -1; _worldBaselineReady = false; }
+            catch { DigestQueue.Reset(-1); _worldBaselineReady = false; }
             _loggedFirstEvent = false;
         }
 
         public static void SuspendForWorldChange()
         {
-            _lastProcessedDate = -1;
+            DigestQueue.Reset(-1);
             _worldBaselineReady = false;
             _loggedFirstEvent = false;
-            _processingDate = -1;
             _travelStopIssued = false;
             _monthAdvanceStopIssued = false;
-            DigestQueue.Clear();
         }
 
         // The base game exposes this same frontend authority to disable reading, character
@@ -280,7 +176,7 @@ namespace JianghuYouling
                 if (!_loggedFirstEvent)
                 {
                     _loggedFirstEvent = true;   // 只打一次:确认月度状态事件确实到达(排查「本月动向从没触发」)
-                    Debug.Log("[江湖有灵] 首次收到月度状态事件(state=" + bgd.AdvancingMonthState + " date=" + bgd.CurrDate + " taiwu=" + bgd.TaiwuCharId + " 基线=" + _lastProcessedDate + ")");
+                    Debug.Log("[江湖有灵] 首次收到月度状态事件(state=" + bgd.AdvancingMonthState + " date=" + bgd.CurrDate + " taiwu=" + bgd.TaiwuCharId + " 基线=" + DigestQueue.LastClaimedDate + ")");
                 }
                 if (bgd.AdvancingMonthState != 0)
                 {
@@ -291,12 +187,12 @@ namespace JianghuYouling
                     if (!_monthAdvanceStopIssued)
                     {
                         _monthAdvanceStopIssued = true;
-                        bool interruptedDigest = _processingDate >= 0;
+                        bool interruptedDigest = DigestQueue.RunningDate >= 0;
                         MonthlyEventGenerator.CancelForMonthAdvance();
                         CompanionMonthlyActions.CancelForMonthAdvance();
                         if (interruptedDigest)
                             Debug.Log("[JHYL_MONTHLY_NATIVE_ADVANCE_STOP] digest_date="
-                                + _processingDate + " advancing_state=" + bgd.AdvancingMonthState
+                                + DigestQueue.RunningDate + " advancing_state=" + bgd.AdvancingMonthState
                                 + " new_date=" + bgd.CurrDate);
                     }
                     return;
@@ -308,12 +204,8 @@ namespace JianghuYouling
                 int taiwuId = bgd.TaiwuCharId;
                 int date = bgd.CurrDate;
                 if (taiwuId <= 0) return;
-                if (date <= _lastProcessedDate) return;
-                if (DigestScheduled(date))
+                if (date <= DigestQueue.LastClaimedDate)
                 {
-                    // A failed pending-checkpoint write leaves the month queued without
-                    // consuming it. Repeated state-0 notifications must retry that queue
-                    // head instead of treating the in-memory dedupe marker as completion.
                     TryStartNextDigest();
                     return;
                 }
@@ -326,7 +218,7 @@ namespace JianghuYouling
                 }
                 ProcessQueue(taiwuId, date);
                 RefreshArchivedCharacterStates(taiwuId);
-                TriggerMonthlyDigest(taiwuId, date, 0);       // 完整提交后才消费日期；空结果会有限重试
+                TriggerMonthlyDigest(taiwuId, date);
             }
             catch (Exception e)
             {
@@ -334,180 +226,81 @@ namespace JianghuYouling
             }
         }
 
-        // 「本月动向」:事件真实副作用 checkpoint 后允许同道并行预载/规划；同道 mutation
-        // 仍由外部门等待事件故事、Saga 投影、见闻记忆和事件日志全部提交。展示层按完成项
-        // 增量刷新，不再让先完成的结果等待最慢的一位同道。
-        private static void TriggerMonthlyDigest(int taiwuId, int date, int priorAttempts)
+        // Consume a month before starting either lane. Record failures never reopen it.
+        private static void TriggerMonthlyDigest(int taiwuId, int date)
         {
-            try
-            {
-                if (taiwuId <= 0 || date < 0 || date <= _lastProcessedDate || DigestScheduled(date)) return;
-                DigestQueue.Add(new DigestWork
-                {
-                    TaiwuId = taiwuId,
-                    Date = date,
-                    Attempts = Math.Max(0, Math.Min(DigestRetryLimit, priorAttempts)),
-                });
-                DigestQueue.Sort((left, right) => left.Date.CompareTo(right.Date));
-                TryStartNextDigest();
-            }
-            catch (Exception e)
-            {
-                Debug.LogWarning("[江湖有灵] 过月动向异常: " + e.GetType().Name);
-            }
-        }
-
-        private static bool DigestScheduled(int date)
-        {
-            if (_processingDate == date) return true;
-            for (int i = 0; i < DigestQueue.Count; i++)
-                if (DigestQueue[i] != null && DigestQueue[i].Date == date) return true;
-            return false;
+            if (DigestQueue.Claim(taiwuId, date)) TryStartNextDigest();
         }
 
         private static void TryStartNextDigest()
         {
-            if (_processingDate >= 0 || DigestQueue.Count == 0 || !_worldBaselineReady
-                || !WorldLifecycle.HasWorldIdentity) return;
-            if (IsAdvancingMonthForMonthlyWork() || IsSavingWorldForMonthlyWork()) return;
+            if (!_worldBaselineReady || !WorldLifecycle.HasWorldIdentity
+                || IsAdvancingMonthForMonthlyWork() || IsSavingWorldForMonthlyWork()) return;
             var host = DigestHost();
-            if (host == null) return;
-            while (DigestQueue.Count > 0 && DigestQueue[0].Date <= _lastProcessedDate)
-                DigestQueue.RemoveAt(0);
-            if (DigestQueue.Count == 0) return;
-
-            DigestWork work = DigestQueue[0];
-            if (!SaveDigestState(true, work.Date, work.Attempts))
+            if (host == null || !DigestQueue.TryStart(out int taiwuId, out int date)) return;
+            try { host.StartCoroutine(RunDigestOnce(taiwuId, date)); }
+            catch (Exception e)
             {
-                Debug.LogWarning("[JHYL_MONTHLY_DIGEST_DEFERRED] pending checkpoint failed date=" + work.Date);
-                return;
-            }
-            try
-            {
-                _processingDate = work.Date;
-                host.StartCoroutine(RunDigestWithRetry(work.TaiwuId, work.Date, work.Attempts));
-                DigestQueue.RemoveAt(0);
-                Debug.Log("[JHYL_MONTHLY_DIGEST_SERIAL] started=" + work.Date
-                    + " queued=" + DigestQueue.Count);
-            }
-            catch
-            {
-                _processingDate = -1;
-                throw;
+                DigestQueue.Finish(date);
+                Debug.LogWarning("[JHYL_MONTHLY_DIGEST_START_FAILED] date=" + date
+                    + " error=" + e.GetType().Name + " retry=false");
             }
         }
 
-        private static void ResumePendingDigest(int taiwuId, int date, int priorAttempts)
+        private static System.Collections.IEnumerator RunDigestOnce(int taiwuId, int date)
         {
-            TriggerMonthlyDigest(taiwuId, date, priorAttempts);
-        }
-
-        private static System.Collections.IEnumerator RunDigestWithRetry(int taiwuId, int date, int priorAttempts)
-        {
-            // A recovered pending state at the retry limit means all network work already
-            // finished and only the durable completion marker is missing. Never lower it and
-            // execute the whole monthly agent batch again.
-            int attempts = MonthlyDigestAttemptPolicy.NormalizeRecoveredAttempts(
-                priorAttempts, DigestRetryLimit);
-            bool producedResult = false;
             int generation = WorldLifecycle.Generation;
             uint worldId = WorldLifecycle.WorldId;
-            string capturedDigestStatePath = DigestStatePath();
-            yield return WaitForNativeSave(generation, worldId);
-            if (!DigestWorldIsCurrent(generation, worldId)) yield break;
-            MonthlyAgentRequestBudget.Begin(worldId, taiwuId, date);
-            MonthlyChronicleNoticeStore.BeginGeneration(taiwuId, date);
-            if (IsAdvancingMonthForMonthlyWork())
-            {
-                RecordStoppedDigest(taiwuId, date, AiEventStore.Load(), CompanionMonthlyStore.Load(),
-                    generation, worldId, NativeAdvanceStopReason);
-                producedResult = true;
-            }
-            while (MonthlyDigestAttemptPolicy.MayRunNetwork(attempts, DigestRetryLimit)
-                && DigestWorldIsCurrent(generation, worldId)
-                && !IsAdvancingMonthForMonthlyWork())
+            try
             {
                 yield return WaitForNativeSave(generation, worldId);
                 if (!DigestWorldIsCurrent(generation, worldId)) yield break;
-                if (IsAdvancingMonthForMonthlyWork())
+                MonthlyAgentRequestBudget.Begin(worldId, taiwuId, date);
+                MonthlyChronicleNoticeStore.BeginGeneration(taiwuId, date);
+                var stack = new Stack<System.Collections.IEnumerator>();
+                stack.Push(RunDigest(taiwuId, date));
+                try
                 {
-                    RecordStoppedDigest(taiwuId, date, AiEventStore.Load(), CompanionMonthlyStore.Load(),
-                        generation, worldId, NativeAdvanceStopReason);
-                    producedResult = true;
-                    break;
+                    while (stack.Count > 0 && DigestWorldIsCurrent(generation, worldId))
+                    {
+                        var iterator = stack.Peek();
+                        bool hasNext = false;
+                        object next = null;
+                        Exception failure = null;
+                        try { hasNext = iterator.MoveNext(); if (hasNext) next = iterator.Current; }
+                        catch (Exception e) { failure = e; }
+                        if (failure != null)
+                        {
+                            Debug.LogWarning("[JHYL_MONTHLY_DIGEST_FAILED] date=" + date
+                                + " error=" + failure.GetType().Name + " retry=false");
+                            RecordStoppedDigest(taiwuId, date, AiEventStore.Load(), CompanionMonthlyStore.Load(),
+                                generation, worldId, "本月生成遇到异常，未完成部分已结束；已执行的动作不会重试。");
+                            MonthlyEventGenerator.CancelForMonthAdvance();
+                            CompanionMonthlyActions.CancelForMonthAdvance();
+                            break;
+                        }
+                        if (!hasNext) { (stack.Pop() as IDisposable)?.Dispose(); continue; }
+                        if (next is System.Collections.IEnumerator nested
+                            && !(next is YieldInstruction) && !(next is CustomYieldInstruction))
+                            stack.Push(nested);
+                        else yield return next;
+                    }
                 }
-                bool finished = false;
-                yield return RunDigest(taiwuId, date, useful => { producedResult = useful; finished = true; });
-                // Digest hosts survive scene changes. Never consume an old world's
-                // attempt or resolve its state path against the newly activated world.
-                if (!DigestWorldIsCurrent(generation, worldId)) yield break;
-                attempts++;
-                // Persist every consumed full-digest attempt before inspecting its result.
-                // This also covers useful results, cancelled callbacks and budget exhaustion;
-                // otherwise a restart in the completion-marker window can repeat expensive
-                // model work and replay the same month's already-journaled side effects.
-                bool attemptCheckpointSaved = SaveDigestStateAtPath(
-                    capturedDigestStatePath, true, date, attempts);
-                if (!attemptCheckpointSaved)
+                finally
                 {
-                    Debug.LogWarning("[JHYL_MONTHLY_DIGEST_ATTEMPT_CHECKPOINT_FAILED] date="
-                        + date + " attempts=" + attempts + " network_retry_suppressed=true");
-                    break;
-                }
-                if (IsAdvancingMonthForMonthlyWork())
-                {
-                    // This older month was deliberately canceled so it cannot mutate during the
-                    // newly-started native settlement. Consume it instead of relaunching it from
-                    // the retry loop; the new stable date will enqueue its own digest at state 0.
-                    producedResult = true;
-                    Debug.Log("[JHYL_MONTHLY_NATIVE_ADVANCE_CONSUMED] date=" + date
-                        + " attempts=" + attempts);
-                    break;
-                }
-                if (!finished || producedResult) break;
-                // A full-digest retry must not reset or bypass the cost circuit.  Once the
-                // monthly request/token budget is exhausted, retrying all agents cannot add
-                // useful information and used to multiply one month into thousands of calls.
-                if (MonthlyAgentRequestBudget.IsExhausted(worldId, taiwuId, date)) break;
-                if (attempts < DigestRetryLimit)
-                {
-                    Debug.LogWarning("[JHYL_MONTHLY_DIGEST_RETRY] date=" + date + " attempt=" + (attempts + 1));
-                    float retryAt = Time.unscaledTime + Math.Min(8f, 1.5f * attempts);
-                    while (Time.unscaledTime < retryAt
-                        && DigestWorldIsCurrent(generation, worldId)) yield return null;
+                    while (stack.Count > 0)
+                        try { (stack.Pop() as IDisposable)?.Dispose(); } catch { }
                 }
             }
-            if (!DigestWorldIsCurrent(generation, worldId)) yield break;
-            bool completionSaved = false;
-            int completionSaveAttempt = 0;
-            while (!completionSaved && DigestWorldIsCurrent(generation, worldId))
+            finally
             {
-                completionSaveAttempt++;
-                if (SaveDigestStateAtPath(capturedDigestStatePath, false, date, attempts))
+                if (DigestWorldIsCurrent(generation, worldId))
                 {
-                    completionSaved = true;
-                    break;
+                    MonthlyChronicleNoticeStore.EndGeneration(taiwuId, date);
+                    DigestQueue.Finish(date);
+                    TryStartNextDigest();
                 }
-                // Retain ownership of the one durable pending checkpoint, but keep retrying in
-                // this session. A short transient disk/AV lock must not stall every later month
-                // until the player restarts. Back off to 30s while the world remains current.
-                float delay = completionSaveAttempt <= 3
-                    ? 0.25f * completionSaveAttempt
-                    : Math.Min(30f, 2f * (completionSaveAttempt - 2));
-                Debug.LogWarning("[JHYL_MONTHLY_DIGEST_COMPLETION_RETRY] date=" + date
-                    + " attempt=" + completionSaveAttempt + " retry_in_seconds=" + delay
-                    + " newer_months_blocked=" + DigestQueue.Count);
-                float retryAt = Time.unscaledTime + delay;
-                while (Time.unscaledTime < retryAt
-                    && DigestWorldIsCurrent(generation, worldId)) yield return null;
             }
-            if (!completionSaved || !DigestWorldIsCurrent(generation, worldId)) yield break;
-            MonthlyChronicleNoticeStore.EndGeneration(taiwuId, date);
-            _lastProcessedDate = Math.Max(_lastProcessedDate, date);
-            if (_processingDate == date) _processingDate = -1;
-            if (!producedResult)
-                Debug.LogWarning("[JHYL_MONTHLY_DIGEST_EMPTY_AFTER_RETRIES] date=" + date + " attempts=" + attempts);
-            TryStartNextDigest();
         }
 
         private static MonoBehaviour DigestHost()
@@ -517,10 +310,10 @@ namespace JianghuYouling
             return host;
         }
 
-        private static System.Collections.IEnumerator RunDigest(int taiwuId, int date, Action<bool> onFinished)
+        private static System.Collections.IEnumerator RunDigest(int taiwuId, int date)
         {
             var host = DigestHost();
-            if (host == null) { onFinished?.Invoke(false); yield break; }
+            if (host == null) yield break;
             int generation = WorldLifecycle.Generation;
             uint worldId = WorldLifecycle.WorldId;
             if (!WorldLifecycle.IsSameWorld(generation)) yield break;
@@ -532,18 +325,15 @@ namespace JianghuYouling
                     generation, worldId, NativeAdvanceStopReason);
                 Debug.Log("[JHYL_MONTHLY_NATIVE_ADVANCE_SKIP] date=" + date
                     + " event=false companion=false retry=false");
-                onFinished?.Invoke(true);
                 yield break;
             }
             if (IsTravelingForMonthlyWork())
             {
-                // A travel month is deliberately consumed as handled. Returning false would
-                // make RunDigestWithRetry launch the same two lanes again during the trip.
+                // Travel consumes this month's attempt; the next month starts fresh.
                 RecordStoppedDigest(taiwuId, date, runEvent, runActions,
                     generation, worldId, TravelStopReason);
                 Debug.Log("[JHYL_MONTHLY_TRAVEL_SKIP] date=" + date
                     + " event=false companion=false retry=false");
-                onFinished?.Invoke(true);
                 yield break;
             }
             float digestStarted = Time.unscaledTime;
@@ -552,6 +342,7 @@ namespace JianghuYouling
             List<CompanionMonthlyResult> companionActions = null; bool companionDone = false;
             int companionCompleted = 0, companionTotal = 0;
             int archivedCompanionCount = 0;
+            int archivedInterruptedCount = 0;
             var laneCoordinator = new MonthlyLaneCoordinator(runEvent);
             Func<int, IReadOnlyCollection<int>, bool> companionMutationGate = (actorId, targetIds) =>
                 laneCoordinator.CanCompanionMutate(actorId, targetIds);
@@ -589,41 +380,48 @@ namespace JianghuYouling
             Action publishProgress = () =>
             {
                 if (!WorldLifecycle.IsSameWorld(generation) || WorldLifecycle.WorldId != worldId) return;
+                bool hasCompanionResult = runActions && companionActions != null
+                    && companionActions.Count > 0;
+                // JHYL_MONTHLY_ARCHIVE_COALESCED: 进度 UI 仍逐人刷新，但纪事档案属于耐久
+                // 大文件，不能每完成一人就在 Unity 主线程做整份读回、三副本原子提交。
+                // 首个结果、明确中止和整批完成时归档。先归档再检查整月中止，防止取消吞掉回执。
+                int currentCompanionCount = hasCompanionResult ? companionActions.Count : 0;
+                int interruptedCount = hasCompanionResult
+                    ? companionActions.FindAll(value => value != null && !string.IsNullOrWhiteSpace(value.StopReason)).Count : 0;
+                bool shouldArchiveCompanions = currentCompanionCount > archivedCompanionCount
+                    && (archivedCompanionCount == 0 || companionDone || interruptedCount > archivedInterruptedCount);
+                if (shouldArchiveCompanions)
+                {
+                    bool archived = EventLogStore.UpsertMonthlyDigest(taiwuId, date, companionActions);
+                    if (!archived)
+                    {
+                        const string warning = "记录未完整保存：本月同道结果已显示，但纪事归档写入失败；已执行的动作不会重试，也不会跨月补记。";
+                        Debug.LogWarning("[江湖有灵] " + warning);
+                        MonthlyChronicleProgressStore.WarnIncompleteRecords(taiwuId, date, warning);
+                        HistoryWindow.RefreshEventsIfOpen(taiwuId, date);
+                    }
+                    else
+                    {
+                        archivedCompanionCount = currentCompanionCount;
+                        archivedInterruptedCount = interruptedCount;
+                        MonthlyChronicleNoticeStore.NotifyArchiveChanged(taiwuId);
+                        HistoryWindow.RefreshEventsIfOpen(taiwuId, date);
+                    }
+                }
                 observeStop();
                 if (!string.IsNullOrWhiteSpace(stopReason)) return;
                 int pending = companionDone ? 0 : Math.Max(0, companionTotal - companionCompleted);
                 MonthlyChronicleProgressStore.Publish(date, taiwuId, runEvent, evDone,
                     runActions, companionDone, pending, generation, worldId);
                 HistoryWindow.RefreshEventsIfOpen(taiwuId, date);
-                // JHYL_MONTHLY_FIRST_LANE_COMPLETION_POPUP:事件分支只要结束（包括地点无人、
-                // 明确无事件或失败后空结果）就必须让玩家看见状态；同道则在第一个子 Agent
-                // 完成时出现。不能再把“已结束但为空”误当成“仍未完成”而整月静默。
+                // JHYL_MONTHLY_FIRST_LANE_COMPLETION_POPUP:任一分支结束即展示状态，包括空结果。
                 bool eventLaneCompleted = runEvent && evDone;
                 bool companionLaneCompleted = runActions && companionCompleted > 0;
                 bool anyReady = eventLaneCompleted || companionLaneCompleted;
                 if (!anyReady) return;
-                bool hasCompanionResult = runActions && companionActions != null
-                    && companionActions.Count > 0;
                 MonthlyDigestPopup.ShowProgress(date, evText, evArea, evHeard, companionActions,
                     taiwuId, null, runEvent, evDone, runActions, companionDone, pending,
                     generation, worldId);
-                // JHYL_MONTHLY_ARCHIVE_COALESCED: 进度 UI 仍逐人刷新，但纪事档案属于耐久
-                // 大文件，不能每完成一人就在 Unity 主线程做整份读回、三副本原子提交。
-                // 首个结果先落盘以保留长任务的中途恢复点，之后只在整批完成时提交最终快照。
-                int currentCompanionCount = hasCompanionResult ? companionActions.Count : 0;
-                bool shouldArchiveCompanions = currentCompanionCount > archivedCompanionCount
-                    && (archivedCompanionCount == 0 || companionDone);
-                if (shouldArchiveCompanions)
-                {
-                    bool archived = EventLogStore.UpsertMonthlyDigest(taiwuId, date, companionActions);
-                    if (!archived) Debug.LogWarning("[江湖有灵] 本月同道结果已显示，但月度总览归档尚未提交");
-                    else
-                    {
-                        archivedCompanionCount = currentCompanionCount;
-                        MonthlyChronicleNoticeStore.NotifyArchiveChanged(taiwuId);
-                        HistoryWindow.RefreshEventsIfOpen(taiwuId, date);
-                    }
-                }
             };
             Action startCompanionPlanning = () =>
             {
@@ -747,9 +545,6 @@ namespace JianghuYouling
             }
             Debug.Log("[JHYL_MONTHLY_DIGEST_TIMING] total_ms=" + ElapsedMs(digestStarted) + " eventDone=" + evDone + " companionDone=" + companionDone);
             publishProgress();
-            bool useful = !string.IsNullOrWhiteSpace(stopReason) || (!runEvent && !runActions) || !string.IsNullOrWhiteSpace(evText)
-                || companionActions != null && companionActions.Count > 0;
-            onFinished?.Invoke(useful);
         }
 
         private static int ElapsedMs(float started)

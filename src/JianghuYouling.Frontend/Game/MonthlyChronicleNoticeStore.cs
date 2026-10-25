@@ -227,6 +227,7 @@ namespace JianghuYouling
         {
             var text = new StringBuilder();
             Add(text, entry.Area); Add(text, entry.Text); Add(text, entry.Brief); Add(text, entry.Detail);
+            if (!string.IsNullOrWhiteSpace(entry.GenerationFailureReason)) Add(text, entry.GenerationFailureReason);
             if (entry.Actions != null) foreach (string action in entry.Actions) Add(text, action);
             return Fingerprint(text.ToString());
         }
@@ -235,6 +236,7 @@ namespace JianghuYouling
         {
             var text = new StringBuilder();
             Add(text, entry.Summary); Add(text, entry.Detail);
+            if (!string.IsNullOrWhiteSpace(entry.StopReason)) Add(text, entry.StopReason);
             if (entry.Outcomes != null) foreach (string outcome in entry.Outcomes) Add(text, outcome);
             return Fingerprint(text.ToString());
         }

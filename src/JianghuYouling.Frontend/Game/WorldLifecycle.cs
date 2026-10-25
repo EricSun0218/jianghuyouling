@@ -120,6 +120,7 @@ namespace JianghuYouling
             Debug.Log("[江湖有灵] 世界身份已就绪(worldId=" + worldId + ",gen=" + _generation + ")");
             WorkshopUpdateChecker.CheckOnceAfterWorldReady();
             OperationRpcClient.ReplayAcknowledgementOutbox();
+            MonthlyOperationReceipts.CleanUp();
             TalkOrchestrator.RecoverWorldPendingConversations();
             GroupChatOrchestrator.RecoverWorldTransactions();
         }
@@ -155,6 +156,7 @@ namespace JianghuYouling
             Debug.Log("[江湖有灵] 太吾身份已更新，重放同世界旧身份事务 worldId=" + worldId
                 + ",taiwuId=" + taiwuId + ",gen=" + _generation);
             OperationRpcClient.ReplayAcknowledgementOutbox();
+            MonthlyOperationReceipts.CleanUp();
             TalkOrchestrator.RecoverWorldPendingConversations();
             GroupChatOrchestrator.RecoverWorldTransactions();
             CharacterProxyIdentityService.Prewarm(taiwuId);

@@ -30,7 +30,6 @@ namespace JianghuYouling
     public static class MonthlyEventGenerator
     {
         private const float OperationReceiptWaitSeconds = 15f;
-        private const float OperationReconcileWaitSeconds = 8f;
         private const float RosterMetricsDeadlineSeconds = 8f;
         private const int RosterMetricsMaxConcurrency = 8;
         // The 360-700 character range remains a writing target, not a rigid template.  A much
@@ -51,7 +50,9 @@ namespace JianghuYouling
         static bool _running;
         static int _runningGeneration;
         static CancellationTokenSource _runningCancellation;
+        static EventSaga _activeRunSaga;
         static string _evText; static string _evArea; static int _evHeard;
+        static string _eventFailureReason;
 
         private sealed class RosterMetric
         {
@@ -73,7 +74,7 @@ namespace JianghuYouling
         private sealed class EventAgentToolResult
         {
             internal string ModelResult;
-            internal bool CheckpointOk = true;
+            internal bool CanContinue = true;
             internal bool Unknown;
             internal bool Succeeded;
             internal bool Attempted;
@@ -110,13 +111,6 @@ namespace JianghuYouling
             internal string Description;
         }
 
-        private enum ProjectionAuthorityState
-        {
-            Current,
-            StaleAfterSaveRollback,
-            Unavailable,
-        }
-
         public static IEnumerator RunMonthly(int taiwuId, int date, Action<string, string, int> onEvent,
             bool forceSaga = false, Action onMutationCheckpoint = null,
             Action<IReadOnlyCollection<int>> onParticipantsResolved = null,
@@ -149,108 +143,98 @@ namespace JianghuYouling
             var runCancellation = new CancellationTokenSource();
             _runningCancellation = runCancellation;
             _evText = null; _evArea = null; _evHeard = 0;
-            bool checkpointSignaled = false;
-            bool participantsSignaled = false;
-            var signaledParticipants = new HashSet<int>();
-            Action<IReadOnlyCollection<int>> signalParticipants = ids =>
-            {
-                bool changed = !participantsSignaled;
-                participantsSignaled = true;
-                if (ids != null)
-                    foreach (int id in ids)
-                        if (id > 0 && signaledParticipants.Add(id)) changed = true;
-                if (!changed) return;
-                try { onParticipantsResolved?.Invoke(new List<int>(signaledParticipants)); }
-                catch (Exception e)
-                {
-                    Debug.LogWarning("[JHYL_MONTHLY_PARTICIPANTS_CALLBACK_ERROR] "
-                        + e.GetType().Name);
-                }
-            };
-            Action signalMutationCheckpoint = () =>
-            {
-                if (checkpointSignaled) return;
-                checkpointSignaled = true;
-                try { onMutationCheckpoint?.Invoke(); }
-                catch (Exception e)
-                {
-                    Debug.LogWarning("[JHYL_MONTHLY_MUTATION_CHECKPOINT_CALLBACK_ERROR] "
-                        + e.GetType().Name);
-                }
-            };
-            // 安全驱动:把内层子协程(RunWorldSimAgent/ExecuteEventTool/FetchGrade/AddArea…)压栈、在同一 try 下逐步 MoveNext 驱动,
-            // 而非 `yield return 子协程` 交给 Unity——否则子协程内未捕获的异常会绕过本 try、令下方 _running=false 永不执行,
-            // 锁死 _running=true,本会话所有过月事件就此瘫痪。压栈后任何一层抛异常都被接住、弹出该层继续,_running 必然解锁。
+            _eventFailureReason = null;
+            _activeRunSaga = null;
             var stack = new Stack<IEnumerator>();
-            stack.Push(EnsureConversationIndexesThenRunMonthly(taiwuId, date, forceSaga,
-                signalMutationCheckpoint,
-                signalParticipants, runCancellation.Token));
-            while (stack.Count > 0)
+            try
             {
-                if (runCancellation.IsCancellationRequested || !WorldLifecycle.IsSameWorld(worldGeneration)
-                    || MonthlySettlement.IsAdvancingMonthForMonthlyWork())
+                MonthlyOperationReceipts.CleanUp();
+                bool checkpointSignaled = false;
+                bool participantsSignaled = false;
+                var signaledParticipants = new HashSet<int>();
+                Action<IReadOnlyCollection<int>> signalParticipants = ids =>
                 {
-                    Debug.Log("[江湖有灵] 过月事件:存档已切换或本体开始下一次过月，中止旧批次");
-                    break;
-                }
-                var it = stack.Peek();
-                object cur = null; bool has = false;
-                try { has = it.MoveNext(); if (has) cur = it.Current; }
-                catch (Exception e) { Debug.LogWarning("[江湖有灵] 本月AI事件异常: " + e.GetType().Name); stack.Pop(); continue; }
-                if (!has) { stack.Pop(); continue; }
-                // 普通子协程入栈续驱;Unity 的等待指令(WaitUntil/WaitForSecondsRealtime/null 等)才上抛给 Unity
-                if (cur is IEnumerator nested && !(cur is YieldInstruction) && !(cur is CustomYieldInstruction)) { stack.Push(nested); continue; }
-                yield return cur;
-            }
-            // The event switch means one visible jianghu story every month.  Safety barriers may
-            // still block mutations (unreconciled receipts, an unreadable saga, too few named
-            // locals, provider failure), but those conditions must not turn into an empty month.
-            // In that case archive a non-mutating local episode; it never claims a tool succeeded.
-            if (!runCancellation.IsCancellationRequested && WorldLifecycle.IsSameWorld(worldGeneration)
-                && !MonthlySettlement.IsAdvancingMonthForMonthlyWork()
-                && string.IsNullOrWhiteSpace(_evText))
-                EnsureGuaranteedMonthlyEvent(taiwuId, date);
-            // Visible event completion and mutation isolation are separate milestones.
-            // A prepared/pending operation may still land after an RPC timeout, so only a
-            // reliable journal with no pending operation may release overlapping companions.
-            if (!runCancellation.IsCancellationRequested
-                && WorldLifecycle.IsSameWorld(worldGeneration)
-                && !MonthlySettlement.IsAdvancingMonthForMonthlyWork())
-            {
-                EventSaga terminalSaga = EventSagaStore.Load(taiwuId);
-                var pendingParticipants = new List<int>();
-                bool pendingIdentitiesReliable;
-                bool mutationIsolationUnresolved = terminalSaga == null || !terminalSaga.LoadReliable
-                    || terminalSaga.PendingOperationIds != null
-                    && terminalSaga.PendingOperationIds.Count > 0;
-                if (mutationIsolationUnresolved)
-                {
-                    pendingIdentitiesReliable = TryCollectPendingMutationParticipants(
-                        terminalSaga, pendingParticipants);
-                    signalParticipants(pendingParticipants);
-                    try
-                    {
-                        onMutationIsolationUnresolved?.Invoke(
-                            pendingParticipants, pendingIdentitiesReliable);
-                    }
+                    bool changed = !participantsSignaled;
+                    participantsSignaled = true;
+                    if (ids != null)
+                        foreach (int id in ids)
+                            if (id > 0 && signaledParticipants.Add(id)) changed = true;
+                    if (!changed) return;
+                    try { onParticipantsResolved?.Invoke(new List<int>(signaledParticipants)); }
                     catch (Exception e)
                     {
-                        Debug.LogWarning("[JHYL_MONTHLY_MUTATION_ISOLATION_CALLBACK_ERROR] "
+                        Debug.LogWarning("[JHYL_MONTHLY_PARTICIPANTS_CALLBACK_ERROR] "
                             + e.GetType().Name);
                     }
-                    Debug.LogWarning("[JHYL_MONTHLY_MUTATION_ISOLATION_RETAINED] pending="
-                        + (terminalSaga?.PendingOperationIds?.Count ?? -1)
-                        + " identitiesReliable=" + pendingIdentitiesReliable);
-                }
-                else
+                };
+                Action signalMutationCheckpoint = () =>
                 {
-                    signalMutationCheckpoint();
+                    if (checkpointSignaled) return;
+                    checkpointSignaled = true;
+                    try { onMutationCheckpoint?.Invoke(); }
+                    catch (Exception e)
+                    {
+                        Debug.LogWarning("[JHYL_MONTHLY_MUTATION_CHECKPOINT_CALLBACK_ERROR] "
+                            + e.GetType().Name);
+                    }
+                };
+                // 在同一驱动器内捕获子协程异常；中断即结束，finally 统一释放运行状态。
+                stack.Push(EnsureConversationIndexesThenRunMonthly(taiwuId, date, forceSaga,
+                    signalMutationCheckpoint,
+                    signalParticipants, runCancellation.Token));
+                while (stack.Count > 0)
+                {
+                    if (runCancellation.IsCancellationRequested || !WorldLifecycle.IsSameWorld(worldGeneration)
+                        || MonthlySettlement.IsAdvancingMonthForMonthlyWork())
+                    {
+                        Debug.Log("[江湖有灵] 过月事件:存档已切换或本体开始下一次过月，中止旧批次");
+                        break;
+                    }
+                    var it = stack.Peek();
+                    object cur = null; bool has = false;
+                    try { has = it.MoveNext(); if (has) cur = it.Current; }
+                    catch (Exception e)
+                    {
+                        Debug.LogWarning("[江湖有灵] 本月AI事件异常: " + e.GetType().Name);
+                        _eventFailureReason = "江湖事件处理发生内部异常（" + e.GetType().Name + "），本轮已停止。";
+                        if (_activeRunSaga != null) _activeRunSaga.RecordsIncomplete = true;
+                        break;
+                    }
+                    if (!has) { (stack.Pop() as IDisposable)?.Dispose(); continue; }
+                    // 普通子协程入栈续驱;Unity 的等待指令(WaitUntil/WaitForSecondsRealtime/null 等)才上抛给 Unity
+                    if (cur is IEnumerator nested && !(cur is YieldInstruction) && !(cur is CustomYieldInstruction)) { stack.Push(nested); continue; }
+                    yield return cur;
                 }
-                if (!participantsSignaled) signalParticipants(Array.Empty<int>());
+                if (!runCancellation.IsCancellationRequested && WorldLifecycle.IsSameWorld(worldGeneration)
+                    && !MonthlySettlement.IsAdvancingMonthForMonthlyWork())
+                {
+                    EventSaga runSaga = _activeRunSaga;
+                    if (string.IsNullOrWhiteSpace(_evText)) EnsureGuaranteedMonthlyEvent(taiwuId, date);
+                    if (runSaga != null && runSaga.UnconfirmedOperationIds.Count > 0)
+                    {
+                        var pendingParticipants = new List<int>();
+                        bool reliable = TryCollectPendingMutationParticipants(runSaga, pendingParticipants);
+                        signalParticipants(pendingParticipants);
+                        onMutationIsolationUnresolved?.Invoke(pendingParticipants, reliable);
+                    }
+                    else signalMutationCheckpoint();
+                    if (!participantsSignaled) signalParticipants(Array.Empty<int>());
+                    if (runSaga != null && runSaga.RecordsIncomplete)
+                    {
+                        const string warning = "记录未完整保存：部分连载、纪事或见闻文字写入失败；已执行的动作不会重试，也不会跨月补记。";
+                        _evText = (_evText ?? "") + "\n" + warning;
+                        MonthlyChronicleProgressStore.WarnIncompleteRecords(taiwuId, date, warning);
+                    }
+                }
             }
-            if (_runningGeneration == worldGeneration) _running = false;
-            if (ReferenceEquals(_runningCancellation, runCancellation)) _runningCancellation = null;
-            try { runCancellation.Dispose(); } catch { }
+            finally
+            {
+                while (stack.Count > 0)
+                    try { (stack.Pop() as IDisposable)?.Dispose(); } catch { }
+                if (_runningGeneration == worldGeneration) _running = false;
+                if (ReferenceEquals(_runningCancellation, runCancellation)) _runningCancellation = null;
+                runCancellation.Dispose();
+            }
             onEvent?.Invoke(_evText, _evArea, _evHeard);
         }
 
@@ -258,11 +242,11 @@ namespace JianghuYouling
             EventSaga saga, List<int> participants)
         {
             if (participants == null || saga == null || !saga.LoadReliable
-                || saga.PendingOperationIds == null || saga.PendingOperationIds.Count == 0)
+                || saga.UnconfirmedOperationIds == null || saga.UnconfirmedOperationIds.Count == 0)
                 return false;
             if (saga.OutcomeJournal == null) return false;
 
-            var pending = new HashSet<string>(saga.PendingOperationIds,
+            var pending = new HashSet<string>(saga.UnconfirmedOperationIds,
                 StringComparer.Ordinal);
             var matched = new HashSet<string>(StringComparer.Ordinal);
             foreach (EventSagaStepOutcome outcome in saga.OutcomeJournal)
@@ -413,153 +397,22 @@ namespace JianghuYouling
 
             // —— #18 是否有"连载"大事正在演? ——
             var saga = EventSagaStore.Load(taiwuId);
-            if (saga == null || !saga.LoadReliable)
+            _activeRunSaga = saga;
+            if (saga == null) yield break;
+            if (!saga.LoadReliable)
             {
-                Debug.LogWarning("[江湖有灵] 过月事件:Saga main/tmp/bak 均无法可靠读取，拒绝覆盖或派发新副作用");
-                yield break;
+                // Preserve unreadable history on disk, but do not turn it into a global action lock.
+                saga.RecordsIncomplete = true;
+                Debug.LogWarning("[JHYL_MONTHLY_STORY_HISTORY_UNAVAILABLE] new_month_uses_live_state=true");
             }
-            if (saga.Active && !string.IsNullOrWhiteSpace(saga.AreaName))
-                _evArea = saga.AreaName.Trim();
-            // EventSagaStore.Load 已把无主(≤v0.29)连载补上其隔离目录的世界身份；跑到这里 WorldId==0
-            // 只剩"世界身份尚未送达"这一种含义，与非零不匹配一样必须 fail-closed，不许继续派发。
-            if (saga.WorldId == 0 || saga.WorldId != WorldLifecycle.WorldId)
-            {
-                Debug.LogWarning("[江湖有灵] 过月事件:Saga 世界身份缺失或不匹配，拒绝对账、清除或重建(sagaWorld="
-                    + saga.WorldId + ",currentWorld=" + WorldLifecycle.WorldId + ")");
-                yield break;
-            }
-            // 所有区域/名册迁移与 Clear 判断之前，先恢复后端回执。否则位置变化会把唯一的
-            // prepared/pending 证据删掉，既无法投影已经发生的副作用，也无法安全判定能否重建。
-            var reconciledBeforeValidation = new List<string>();
-            bool preValidationReconcileOk = true;
-            bool preValidationRecoveredTerminal = false;
-            AcknowledgeProjectedSagaOutcomes(saga);
-            if (saga.PendingOperationIds != null && saga.PendingOperationIds.Count > 0)
-                yield return ReconcileSagaPendingOperations(taiwuId, saga, date, generation: _runningGeneration,
-                    recovered: reconciledBeforeValidation,
-                    onDone: (ok, anyTerminal) => { preValidationReconcileOk = ok; preValidationRecoveredTerminal = anyTerminal; });
-            if (!preValidationReconcileOk)
-            {
-                Debug.LogWarning("[江湖有灵] 过月事件:Saga 在迁移判断前对账失败，拒绝 Clear 或重建");
-                yield break;
-            }
-            if (saga.PendingOperationIds != null && saga.PendingOperationIds.Count > 0)
-            {
-                Debug.LogWarning("[江湖有灵] 过月事件:Saga 仍有 pending/unknown 证据，暂停迁移与重建");
-                yield break;
-            }
-            EventFanoutCheckpoint currentDateFanout = FindLatestEventFanout(saga, date);
-            ProjectionAuthorityState projectionAuthority = ProjectionAuthorityState.Current;
-            yield return ValidateSagaProjectionAuthority(saga, currentDateFanout, date, _runningGeneration,
-                value => projectionAuthority = value);
-            if (projectionAuthority == ProjectionAuthorityState.Unavailable)
-            {
-                Debug.LogWarning("[JHYL_MONTHLY_PROJECTION_RESTORE_PAUSED] date=" + date
-                    + " reason=current_save_receipt_unavailable");
-                yield break;
-            }
-            if (projectionAuthority == ProjectionAuthorityState.StaleAfterSaveRollback)
-            {
-                if (!ResetSagaAfterSaveRollback(saga, currentDateFanout, date, out saga))
-                {
-                    Debug.LogWarning("[JHYL_MONTHLY_STALE_PROJECTION_RESET_FAILED] date=" + date);
-                    yield break;
-                }
-                _evArea = twAreaName;
-                Debug.LogWarning("[JHYL_MONTHLY_STALE_PROJECTION_RESET] date=" + date
-                    + " reason=backend_operation_missing_in_current_save regenerate=true");
-            }
-            EventFanoutCheckpoint pendingFanout;
-            while ((pendingFanout = FindIncompleteEventFanout(saga)) != null)
-            {
-                if (pendingFanout.WorldDate > date)
-                {
-                    LogFanoutFailure(pendingFanout, "future_checkpoint");
-                    yield break;
-                }
-                bool fanoutRecovered = false;
-                yield return CommitPreparedEventFanout(saga, pendingFanout, taiwuId,
-                    ok => fanoutRecovered = ok);
-                if (!fanoutRecovered || !FinalizeEventProjectionAfterFanout(saga, pendingFanout))
-                {
-                    if (fanoutRecovered) LogFanoutFailure(pendingFanout, "projection_commit");
-                    Debug.LogWarning("[江湖有灵] 过月事件:恢复 durable 风闻 fanout 尚未完成，暂停本月推进");
-                    yield break;
-                }
-                Debug.Log("[江湖有灵] 过月事件:已恢复并完成 EventLog→风闻→Heard→Saga 投影流水线 event="
-                    + pendingFanout.EventId);
-                if (pendingFanout.WorldDate == date)
-                {
-                    _evText = pendingFanout.ProjectionText;
-                    _evArea = pendingFanout.AreaName;
-                    _evHeard = pendingFanout.Heard;
-                    yield break;
-                }
-                // Completing an older month's delivery must not consume this month's event.
-                // Continue through the normal saga/location validation with its restored facts.
-                _evArea = twAreaName;
-            }
-            EventFanoutCheckpoint committedFanout = FindCommittedEventFanout(saga, date);
-            if (committedFanout != null)
-            {
-                _evText = committedFanout.ProjectionText;
-                _evArea = committedFanout.AreaName;
-                _evHeard = committedFanout.Heard;
-                Debug.Log("[江湖有灵] 过月事件:恢复本月已完成的 durable fanout 投影 event="
-                    + committedFanout.EventId + " heard=" + committedFanout.Heard);
-                yield break;
-            }
-            string committedProjection;
-            if (TryRestoreCommittedSagaProjection(saga, date, out committedProjection))
-            {
-                _evText = committedProjection;
-                _evArea = saga.AreaName;
-                _evHeard = 0;
-                Debug.Log("[江湖有灵] 过月事件:恢复本月已 durable 提交的完整故事投影，拒绝重复推进章节");
-                yield break;
-            }
-            if (saga != null && !saga.Active && HasUnprojectedTerminalOutcome(saga, 0)
-                && saga.Chapters != null && saga.Chapters.Count > 0)
-            {
-                // 旧格式没有逐 outcome 的 ProjectionText。迁移时保留全部已有章节，不能只拿末章
-                // 便 ACK 掉更早的终态事实，否则重启恢复会永久缺失前文。
-                string oldStory = string.Join("\n\n", saga.Chapters.ToArray());
-                string title = string.IsNullOrWhiteSpace(saga.Title) ? "江湖风云" : saga.Title;
-                string recoveredProjection = "【江湖连载·〈" + title + "〉·第" + Math.Max(1, saga.MonthsElapsed)
-                    + "回·终】\n" + oldStory;
-                MarkSagaOutcomesProjected(saga, 0, null, recoveredProjection);
-                if (!EventSagaStore.Save(taiwuId, saga)) yield break;
-                AcknowledgeProjectedSagaOutcomes(saga);
-                Debug.Log("[江湖有灵] 过月事件:旧版已完成章节补齐 durable 投影标记，随后才允许迁移");
-                if (saga.CompletedDate == date)
-                {
-                    _evText = recoveredProjection; _evArea = saga.AreaName; _evHeard = 0;
-                    yield break;
-                }
-            }
-            if (saga != null && !saga.Active && EventSagaStore.HasUnsettledEvidence(saga))
-            {
-                Debug.LogWarning("[江湖有灵] 过月事件:非活动连载仍有无法可靠投影的证据，拒绝覆盖重建");
-                yield break;
-            }
-            if (saga != null && !saga.Active && saga.CompletedDate == date)
-            {
-                Debug.Log("[江湖有灵] 过月事件:本月连载已 durable 提交，拒绝在同一日期重复生成");
-                yield break;
-            }
+            if (saga.WorldId != WorldLifecycle.WorldId || saga.TaiwuId != taiwuId) yield break;
+            if (saga.Active && !string.IsNullOrWhiteSpace(saga.AreaName)) _evArea = saga.AreaName.Trim();
             string monthlyTraceId = OperationId.FromStableKey("monthly-agent|" + WorldLifecycle.WorldId
                 + "|" + taiwuId + "|" + date + "|" + Math.Max(0, saga == null ? 0 : saga.StartDate));
             var monthlyTrace = new LlmTraceContext(monthlyTraceId,
                 "monthly:" + WorldLifecycle.WorldId + ":" + taiwuId,
                 "date:" + date);
             bool sagaMode = saga != null && saga.Active && saga.AreaId >= 0 && saga.MonthsElapsed < saga.MonthsTotal && saga.ProtagonistIds != null && saga.ProtagonistIds.Count >= 1;
-            if (sagaMode && saga.WorldId != 0 && saga.WorldId != WorldLifecycle.WorldId)
-            {
-                // 世界不匹配时不能查询、派发或删除另一世界的证据；世界目录异常必须 fail-closed。
-                Debug.LogWarning("[江湖有灵] 过月事件:连载属于另一存档世界，拒绝续演、清除或重建");
-                yield break;
-            }
-
             // A tutorial settlement (and other temporary base-game scenes) can remove all of
             // its NPC objects after the first chapter. Saga names are durable prose identity,
             // not proof that a Character still exists. Revalidate the full frozen pool in one
@@ -603,43 +456,24 @@ namespace JianghuYouling
                         + " area=" + (saga.AreaName ?? "未知"));
                     if (remaining < 2)
                     {
-                        if (EventSagaStore.HasUnsettledEvidence(saga))
-                        {
-                            Debug.LogWarning("[江湖有灵] 过月事件:临时场景班底已消失，但仍有未投影证据，暂停重建");
-                            yield break;
-                        }
-                        if (!EventSagaStore.Clear(taiwuId)) yield break;
+                        EventSagaStore.Clear(taiwuId);
                         Debug.Log("[JHYL_MONTHLY_SAGA_REBUILT_AFTER_TEMPORARY_ROSTER] date="
                             + date + " oldArea=" + (saga.AreaName ?? "未知")
                             + " removed=" + removed);
-                        // No mutation or participant checkpoint has happened yet. Re-enter once
-                        // against the current authoritative area so this same month can create a
-                        // live event instead of waiting a month or archiving ambient fallback.
-                        yield return RunMonthlyInner(taiwuId, date, forceSaga,
-                            signalMutationCheckpoint, signalParticipants, cancellationToken);
-                        yield break;
+                        // Rebuild from live state below even if clearing story history failed.
+                        // Re-reading that same file here would repeat the stale roster forever.
+                        sagaMode = false;
                     }
-                    if (!EventSagaStore.Save(taiwuId, saga))
-                    {
-                        Debug.LogWarning("[江湖有灵] 过月事件:清理失效连载人物后 checkpoint 失败，拒绝继续");
-                        yield break;
-                    }
+                    else SaveStoryHistory(saga);
                 }
             }
             string currentAreaName = !string.IsNullOrWhiteSpace(twAreaName) && twAreaName != "未知" ? twAreaName : ((twArea >= 0 && nameOf.ContainsKey(twArea)) ? nameOf[twArea] : null);
             if (sagaMode && !string.IsNullOrWhiteSpace(saga.AreaName) && nameOf.ContainsKey(saga.AreaId)
                 && !string.Equals(nameOf[saga.AreaId], saga.AreaName, StringComparison.Ordinal))
             {
-                // 旧版曾在名册稀少时把模板 id 写进 AreaId；名称与当前运行时目录冲突时不可猜测迁移，安全结束旧连载。
-                if (EventSagaStore.HasUnsettledEvidence(saga))
-                    Debug.LogWarning("[江湖有灵] 过月事件:旧连载区域命名空间冲突，但仍有未投影终态，先按 checkpoint 完成投影");
-                else
-                {
-                    Debug.Log("[江湖有灵] 过月事件:旧连载区域 id/名称命名空间冲突(" + saga.AreaId + ":" + saga.AreaName + " != " + nameOf[saga.AreaId] + "),已清除");
-                    if (!EventSagaStore.Clear(taiwuId)) yield break;
-                    saga = null;
-                    sagaMode = false;
-                }
+                EventSagaStore.Clear(taiwuId);
+                saga = null;
+                sagaMode = false;
             }
             if (sagaMode && twArea >= 0 && !string.IsNullOrWhiteSpace(currentAreaName) && saga.AreaId != twArea)
             {
@@ -671,14 +505,9 @@ namespace JianghuYouling
                 // 班底已散(主角悉数身故/具名失败,roster<2)→ 这桩大事再续不下去,直接收掉,绝不让它月月卡在原回、把整个连载系统锁死
                 if (roster.Count < 2)
                 {
-                    if (EventSagaStore.HasUnsettledEvidence(saga))
-                        Debug.LogWarning("[江湖有灵] 过月事件:连载班底已散但仍有未投影终态，保留 checkpoint 先恢复故事");
-                    else
-                    {
-                        if (!EventSagaStore.Clear(taiwuId)) yield break;
-                        sagaMode = false;
-                        Debug.Log("[江湖有灵] 过月事件:连载班底已散,清除该连载");
-                    }
+                    EventSagaStore.Clear(taiwuId);
+                    sagaMode = false;
+                    Debug.Log("[江湖有灵] 过月事件:连载班底已散，结束该连载");
                 }
             }
             else
@@ -735,14 +564,8 @@ namespace JianghuYouling
             SortRosterByGradeDesc(roster, rosterMetrics);
             if (sagaMode && roster.Count < 2)
             {
-                if (EventSagaStore.HasUnsettledEvidence(saga))
-                    Debug.LogWarning("[江湖有灵] 过月事件:过滤后班底不足但仍有未投影终态，保留 checkpoint 先恢复故事");
-                else
-                {
-                    if (!EventSagaStore.Clear(taiwuId)) yield break;
-                    sagaMode = false;
-                    Debug.Log("[江湖有灵] 过月事件:过滤婴幼儿后连载班底不足,清除该连载");
-                }
+                EventSagaStore.Clear(taiwuId);
+                sagaMode = false;
             }
 
             if (!sagaMode && roster.Count >= 2)
@@ -757,7 +580,7 @@ namespace JianghuYouling
                     // derived from; starting at zero makes Save correctly reject it as stale.
                     // A concurrent writer can still win after this load, in which case the
                     // normal stale-revision guard continues to fail closed.
-                    Revision = saga == null ? 0 : saga.Revision,
+                    Revision = EventSagaStore.Load(taiwuId).Revision,
                     WorldId = WorldLifecycle.WorldId,
                     TaiwuId = taiwuId,
                     Active = true,
@@ -793,12 +616,8 @@ namespace JianghuYouling
                 ns.Constraints.Add(new EventSagaConstraint { Id = "area", Kind = "runtime_area", Value = eventArea.ToString(), Active = true });
                 saga = ns;
                 sagaMode = true;
-                // 首个副作用前必须先把目标、约束和班底 durable checkpoint 落盘。
-                if (!EventSagaStore.Save(taiwuId, saga))
-                {
-                    Debug.LogWarning("[江湖有灵] 过月事件:新连载 checkpoint 失败，本月拒绝派发任何副作用");
-                    yield break;
-                }
+                _activeRunSaga = saga;
+                SaveStoryHistory(saga);
                 Debug.Log("[江湖有灵] 过月事件:开启连载事件池 " + roster.Count + " 人,共 " + total + " 回@" + areaName);
             }
 
@@ -821,7 +640,6 @@ namespace JianghuYouling
 
             string eventText = null;
             var landed = new List<string>();   // 本桩事代码尝试的成败明细(成功=真实改状态;失败=写明原因)
-            if (reconciledBeforeValidation.Count > 0) landed.AddRange(reconciledBeforeValidation);
 
             // 在场名册编号串 —— 不只给名字,逐人附【当下生死/状态】+【上月增量(身上发生了什么)】,
             // 免得"明明上月已被太吾(或他人)杀了/掳了的人,本回故事还当活人写"。FetchPersonBrief 末尾会带『已故』标记;
@@ -905,32 +723,14 @@ namespace JianghuYouling
                 float rdl = Time.unscaledTime + EffectHandler.ReadOnlyQueryWaitSeconds; while (!rrd && Time.unscaledTime < rdl) yield return null;
             }
 
-            // 已有 durable 终态仍优先恢复；正常月份进入事件 Agent 循环，由主模型
-            // 根据关系与前情选择真实动作。展示正文不在本循环生成。
-            bool hasDurableProjectionToRecover = reconciledBeforeValidation.Count > 0
-                || HasUnprojectedTerminalOutcome(saga, 0);
-            if (roster.Count < 2 && !hasDurableProjectionToRecover)
+            if (roster.Count < 2)
             {
-                Debug.Log("[江湖有灵] 过月事件:太吾所在区域具名人物不足,本月不强行编江湖大事,总耗时 " + ElapsedMs(totalStarted) + "ms");
+                Debug.Log("[江湖有灵] 过月事件:太吾所在区域具名人物不足，本月不强行编江湖大事");
                 yield break;
             }
 
             float agentStarted = Time.unscaledTime;
             bool checkpointOk = true;
-            bool recoveredTerminal = preValidationRecoveredTerminal;
-            if (!checkpointOk)
-            {
-                Debug.LogWarning("[江湖有灵] 过月事件:operation receipt 对账或存盘失败，停止本月后续行动与叙事");
-                yield break;
-            }
-            if (saga.PendingOperationIds != null && saga.PendingOperationIds.Count > 0)
-            {
-                Debug.LogWarning("[江湖有灵] 过月事件:仍有 " + saga.PendingOperationIds.Count
-                    + " 个副作用结果 pending/unknown/not_found；保持隔离并暂停连载，不派发新动作");
-                yield break;
-            }
-            if (CollectUncommittedSagaOutcomes(saga, landed) > 0) recoveredTerminal = true;
-            bool restored = recoveredTerminal || RestoreCurrentDateOutcomes(saga, date, landed);
             int codeChapterNo = sagaMode ? saga.MonthsElapsed + 1 : 0;
             int codeTotal = sagaMode ? saga.MonthsTotal : 0;
             bool codeFinale = sagaMode && codeChapterNo >= codeTotal;
@@ -948,26 +748,22 @@ namespace JianghuYouling
             {
                 saga.TaiwuInvolved = taiwuInvolved;
                 saga.TaiwuFameEvidenceIds = taiwuFameEvidenceIds;
-                if (!EventSagaStore.Save(taiwuId, saga))
-                {
-                    Debug.LogWarning("[江湖有灵] 过月事件:太吾参与状态 checkpoint 失败，本月拒绝继续推进");
-                    yield break;
-                }
+                SaveStoryHistory(saga);
             }
-            if (!restored)
-                yield return RunMonthlyEventAgent(outcomeRoster, roster, rosterRel, sbR.ToString(),
+            yield return RunMonthlyEventAgent(outcomeRoster, roster, rosterRel, sbR.ToString(),
                     areaName, worldState, taiwuParticipation, landed, saga, taiwuId, date, codeChapterNo, codeTotal,
                     codeFinale, cancellationToken, monthlyTrace,
                     (ok, text) => { checkpointOk = ok; eventText = text; });
             if (!checkpointOk)
             {
-                Debug.LogWarning("[江湖有灵] 过月事件:本轮未完成可发布的行动链，停止后续行动与叙事；具体原因见前面的 Agent、最低行动要求或持久化诊断");
+                if (string.IsNullOrWhiteSpace(_eventFailureReason))
+                    _eventFailureReason = "本轮行动链未达到完成条件，江湖事件生成已停止；仅保留已取得的结果。";
+                Debug.LogWarning("[江湖有灵] 过月事件:本轮行动链已停止；本次收尾只展示已取得的结果，不重试动作");
                 yield break;
             }
-            if (saga.PendingOperationIds != null && saga.PendingOperationIds.Count > 0)
+            if (saga.UnconfirmedOperationIds != null && saga.UnconfirmedOperationIds.Count > 0)
             {
-                Debug.LogWarning("[江湖有灵] 过月事件:本轮出现未确认 operation receipt；只保留 durable 隔离证据，"
-                    + "在对账得到终态前不写 EventLog、风闻记忆或章节投影");
+                Debug.LogWarning("[江湖有灵] 过月事件:本轮出现未确认回执，结束行动；保留本次已知结果，未知动作不重试");
                 yield break;
             }
             Debug.Log("[江湖有灵] 过月事件@" + areaName + ":Agent 决策与工具阶段 "
@@ -978,16 +774,13 @@ namespace JianghuYouling
                 yield break;
             }
 
-            // JHYL_MONTHLY_MUTATION_CHECKPOINT: every real event mutation is terminally
-            // checkpointed now. Companion preload/LLM planning may overlap the code-owned receipt projection,
-            // but MonthlySettlement keeps its mutation gate closed until the event callback,
-            // after saga projection, heard-memory writes and event-log commit all finish.
+            // All mutations have returned. Text, memory and archive writes are not a mutation lock.
             signalMutationCheckpoint?.Invoke();
 
             List<StoryProjectionReceipt> storyReceipts = BuildSagaStoryReceipts(saga, date, landed, roster);
             bool storyAuthorityOk = StoryProjectionValidator.TryBuildDurableProjection(landed,
                 storyReceipts, BuildAllowedStoryParticipants(roster, saga), out _, out string storyRejection);
-            // Receipts remain the authority for state recovery and green execution rows, but the
+            // Receipts remain the authority for known facts and green execution rows, but the
             // novel itself is no longer discarded merely because it paraphrases, omits or expands
             // those facts.  This matches normal chat: transaction records and visible prose are
             // persisted side by side instead of forcing prose to serve as a transaction proof.
@@ -1011,42 +804,22 @@ namespace JianghuYouling
                 codeDisplayText = "【江湖连载·〈" + title + "〉·第" + codeChapterNo + "回" + (codeFinale ? "·终" : ("/共" + codeTotal + "回")) + "】\n" + eventText;
             }
 
-            // Freeze a deterministic recipient set in the Saga before EventLog or any NPC
-            // memory is written. The checkpoint is the resumable coordinator for the full
-            // EventLog -> per-recipient memory -> Heard -> Saga projection -> ACK pipeline.
             List<int> recipients = null;
             yield return BuildEventFanoutRecipients(eventArea, twArea, neighborsOf, roster,
                 taiwuId, eventProjectionId, ids => recipients = ids);
-            if (cancellationToken.IsCancellationRequested)
+            if (cancellationToken.IsCancellationRequested || !FanoutWorldIsCurrent(saga, taiwuId)) yield break;
+            var fanout = new MonthlyEventDelivery
             {
-                Debug.LogWarning("[江湖有灵] 过月事件:冻结 fanout 名单时本次运行已取消，不创建 checkpoint");
-                yield break;
-            }
-            if (!FanoutWorldIsCurrent(saga, taiwuId))
-            {
-                // 带上双方身份：区分真正的切档/换太吾与"连载世界身份缺失"这类数据问题，避免再次误诊。
-                Debug.LogWarning("[江湖有灵] 过月事件:冻结 fanout 名单时世界身份不匹配，不创建 checkpoint(sagaWorld="
-                    + saga.WorldId + ",currentWorld=" + WorldLifecycle.WorldId
-                    + ",sagaTaiwu=" + saga.TaiwuId + ",taiwu=" + taiwuId + ")");
-                yield break;
-            }
-            EventFanoutCheckpoint fanout = PrepareEventFanout(saga, eventProjectionId, eventArea,
-                date, areaName, eventText, codeDisplayText, sbR.ToString(), landed,
-                recipients, codeChapterNo, codeFinale);
-            if (fanout == null || !EventSagaStore.Save(taiwuId, saga))
-            {
-                Debug.LogWarning("[江湖有灵] 过月事件:风闻 fanout prepared checkpoint 提交失败，不写纪事或记忆");
-                yield break;
-            }
-            bool fanoutCommitted = false;
-            yield return CommitPreparedEventFanout(saga, fanout, taiwuId,
-                ok => fanoutCommitted = ok);
-            if (!fanoutCommitted || !FinalizeEventProjectionAfterFanout(saga, fanout))
-            {
-                if (fanoutCommitted) LogFanoutFailure(fanout, "projection_commit");
-                Debug.LogWarning("[江湖有灵] 过月事件:EventLog/风闻/Heard 尚未完整 durable 提交，本次不投影、不 ACK");
-                yield break;
-            }
+                EventId = eventProjectionId, WorldDate = date, AreaId = eventArea,
+                AreaName = areaName, StoryText = eventText, ProjectionText = codeDisplayText,
+                Roster = sbR.ToString(), Actions = new List<string>(landed),
+                RecipientIds = recipients ?? new List<int>(), ChapterNumber = codeChapterNo,
+                Finale = codeFinale,
+            };
+            foreach (EventSagaStepOutcome outcome in saga.OutcomeJournal)
+                if (outcome.WorldDate == date) fanout.OutcomeOperationIds.Add(outcome.OperationId);
+            CompleteStoryChapter(saga, fanout);
+            yield return DeliverEventRecords(saga, fanout, taiwuId, cancellationToken);
             int codeHeard = fanout.Heard;
             _evText = codeDisplayText; _evArea = areaName; _evHeard = codeHeard;
             Debug.Log("[江湖有灵] 过月事件@" + areaName + ":代码落地 " + landed.Count + " 项,知会 " + codeHeard + " 人,总耗时 " + ElapsedMs(totalStarted) + "ms");
@@ -1468,7 +1241,11 @@ namespace JianghuYouling
             // JHYL_MONTHLY_EVENTS_ALWAYS_MAIN_MODEL: 江湖事件的查询与动作选择会改变游戏状态，
             // 因而固定使用主模型；玩家可见正文不在这里生成，点击详情后统一交给后台模型。
             OpenAiCompatibleClient client = LlmService.GetClient();
-            if (client == null) { onDone?.Invoke(false, null); yield break; }
+            if (client == null)
+            {
+                _eventFailureReason = "尚未配置可用的主模型接口，江湖事件无法开始生成。";
+                onDone?.Invoke(false, null); yield break;
+            }
 
             string hostilePairs = BuildVerifiedHostilityContext(saga, executionRoster, date);
             var tools = BuildMonthlyEventAgentTools(
@@ -1524,12 +1301,9 @@ namespace JianghuYouling
                     "现在从人物欲望、关系和未决线索出发调用真实工具推进事件。不要让程序替你随机决定人物或动作。")
             };
 
-            // Retries and crash recovery may resume a date that already has terminal journal
-            // entries. Continue after those durable steps instead of reusing mX-s1 and
-            // producing a duplicate operation id that makes the saga unreadable.
-            int actionOrdinal = ExistingSagaActionCount(saga, date);
-            int meaningfulActionCount = ExistingSagaMeaningfulActionCount(saga, date);
-            HashSet<string> actionCategories = ExistingSagaActionCategories(saga, date);
+            int actionOrdinal = 0;
+            int meaningfulActionCount = 0;
+            var actionCategories = new HashSet<string>(StringComparer.Ordinal);
             var completionState = new MonthlyAgentCompletionState(
                 MonthlyEventMinimumActions, MonthlyEventMinimumActionCategories,
                 meaningfulActionCount, actionCategories);
@@ -1643,6 +1417,7 @@ namespace JianghuYouling
                 if (turn == null || !turn.Ok)
                 {
                     string error = turn == null ? "无回执" : (turn.Error ?? "请求失败");
+                    _eventFailureReason = MonthlyInterruption.ModelFailure(error, ElapsedMs(llmStarted), 180);
                     LlmLog.RecordTrajectory("过月江湖事件 Agent", trace?.WithRound(round),
                         "agent_round", "rejected", null, error);
                     break;
@@ -1980,7 +1755,7 @@ namespace JianghuYouling
                     EventAgentToolResult executed = null;
                     yield return ExecuteMonthlyAgentTool(call.Name, args, executionRoster, outcomes, saga,
                         taiwuId, date, actionOrdinal, trace?.WithRound(round), x => executed = x);
-                    if (executed == null || !executed.CheckpointOk)
+                    if (executed == null || !executed.CanContinue)
                     { onDone?.Invoke(false, null); yield break; }
                     if (executed.Attempted)
                     {
@@ -2298,15 +2073,6 @@ namespace JianghuYouling
             return name + "|person=" + person + "|section=" + section + "|secret_target=" + secretTarget;
         }
 
-        static int ExistingSagaActionCount(EventSaga saga, int date)
-        {
-            int count = 0;
-            if (saga?.OutcomeJournal == null) return count;
-            foreach (EventSagaStepOutcome outcome in saga.OutcomeJournal)
-                if (outcome != null && outcome.WorldDate == date) count++;
-            return count;
-        }
-
         static bool CountsTowardsMonthlyEventActionMinimum(string tool)
         {
             if (string.IsNullOrWhiteSpace(tool)) return false;
@@ -2433,30 +2199,6 @@ namespace JianghuYouling
                 case "event_spend_night": return "event_spend_night（成年且已有真实亲密关系与本回情意）";
                 default: return tool;
             }
-        }
-
-        static int ExistingSagaMeaningfulActionCount(EventSaga saga, int date)
-        {
-            int count = 0;
-            if (saga?.OutcomeJournal == null) return count;
-            foreach (EventSagaStepOutcome outcome in saga.OutcomeJournal)
-                if (outcome != null && outcome.WorldDate == date
-                    && string.Equals(outcome.Status, "succeeded", StringComparison.Ordinal)
-                    && CountsTowardsMonthlyEventActionMinimum(outcome.ToolName))
-                    count++;
-            return count;
-        }
-
-        static HashSet<string> ExistingSagaActionCategories(EventSaga saga, int date)
-        {
-            var categories = new HashSet<string>(StringComparer.Ordinal);
-            if (saga?.OutcomeJournal == null) return categories;
-            foreach (EventSagaStepOutcome outcome in saga.OutcomeJournal)
-                if (outcome != null && outcome.WorldDate == date
-                    && string.Equals(outcome.Status, "succeeded", StringComparison.Ordinal)
-                    && CountsTowardsMonthlyEventActionMinimum(outcome.ToolName))
-                    categories.Add(MonthlyEventActionCategory(outcome.ToolName));
-            return categories;
         }
 
         static bool MonthlyEventActionMinimumSatisfied(int meaningfulActionCount,
@@ -3364,7 +3106,7 @@ namespace JianghuYouling
             string argumentsJson = args.ToString(Newtonsoft.Json.Formatting.None);
             string operationBindingKey = EventDispatchEnvelopeBinding.CreateStableKey(
                 saga.WorldId, taiwuId, saga.StartDate, date, stepId, tool,
-                actorId, targetId, argumentsJson);
+                actorId, targetId, argumentsJson) + "|run=" + _runningGeneration;
             string dispatchEnvelopeDigest =
                 DispatchEnvelopeBinding.CreateDigest(dispatchEnvelope);
             string operationId = DispatchEnvelopeBinding.CreateOperationId(
@@ -3384,10 +3126,6 @@ namespace JianghuYouling
                 Code = "DISPATCH_PENDING",
                 Intent = intent,
                 Summary = intent,
-                ArgumentsJson = argumentsJson,
-                OperationBindingKey = operationBindingKey,
-                DispatchEnvelopeJson = dispatchEnvelope,
-                DispatchEnvelopeDigest = dispatchEnvelopeDigest,
                 ActorId = actorId,
                 TargetId = targetId,
                 ActorName = actorName,
@@ -3398,20 +3136,7 @@ namespace JianghuYouling
             result.Attempted = true;
             saga.LastOutcome = journal;
             saga.OutcomeJournal.Add(journal);
-            if (!saga.PendingOperationIds.Contains(operationId)) saga.PendingOperationIds.Add(operationId);
-            if (!EventSagaStore.Save(taiwuId, saga))
-            {
-                saga.PendingOperationIds.Remove(operationId);
-                saga.OutcomeJournal.Remove(journal);
-                saga.LastOutcome = saga.OutcomeJournal.Count > 0
-                    ? saga.OutcomeJournal[saga.OutcomeJournal.Count - 1] : null;
-                result.CheckpointOk = false;
-                result.ModelResult = "动作未派发：prepared checkpoint 存盘失败。";
-                LlmLog.RecordTrajectory("过月江湖事件 Agent", trace, tool, "unknown", operationId,
-                    "SAGA_SAVE_FAILED_BEFORE_DISPATCH");
-                onDone?.Invoke(result); yield break;
-            }
-
+            if (!saga.UnconfirmedOperationIds.Contains(operationId)) saga.UnconfirmedOperationIds.Add(operationId);
             if (!EffectHandler.PrepareOperationIdentity(saga.WorldId, saga.TaiwuId, operationId))
             {
                 journal.Status = "canceled";
@@ -3419,9 +3144,9 @@ namespace JianghuYouling
                 journal.Retryable = false;
                 journal.Summary = OutcomeLine(intent, "未成(存档或太吾身份已变化，动作没有派发)");
                 journal.UpdatedUtcTicks = DateTime.UtcNow.Ticks;
-                saga.PendingOperationIds.Remove(operationId);
-                if (!EventSagaStore.Save(taiwuId, saga)) result.CheckpointOk = false;
-                else outcomes.Add(journal.Summary);
+                saga.UnconfirmedOperationIds.Remove(operationId);
+                SaveStoryHistory(saga);
+                outcomes.Add(journal.Summary);
                 result.ModelResult = journal.Summary;
                 onDone?.Invoke(result); yield break;
             }
@@ -3429,10 +3154,23 @@ namespace JianghuYouling
             string rawResult = null;
             EventToolProjectionEvidence projectionEvidence = null;
             ToolOutcome authoritativeReceipt = null;
+            int dispatchGeneration = WorldLifecycle.Generation;
+            CancellationToken dispatchCancellation = _runningCancellation?.Token ?? CancellationToken.None;
+            MonthlyOperationReceipts.Register(operationId, () =>
+                WorldLifecycle.IsSameWorld(dispatchGeneration) && !dispatchCancellation.IsCancellationRequested
+                && !MonthlySettlement.IsTravelingForMonthlyWork()
+                && !MonthlySettlement.IsAdvancingMonthForMonthlyWork());
             EffectHandler.ObserveOperationOutcome(operationId, value => authoritativeReceipt = value);
-            yield return ExecuteEventTool(tool, dispatchEnvelope, taiwuId, date, value => rawResult = value,
-                value => projectionEvidence = value, operationId);
-            EffectHandler.ForgetOperationOutcomeObserver(operationId);
+            try
+            {
+                yield return ExecuteEventTool(tool, dispatchEnvelope, taiwuId, date, value => rawResult = value,
+                    value => projectionEvidence = value, operationId);
+            }
+            finally
+            {
+                EffectHandler.ForgetOperationOutcomeObserver(operationId);
+                EffectHandler.DiscardPreparedOperation(operationId);
+            }
             bool hasBackendReceipt = authoritativeReceipt != null
                 && string.Equals(authoritativeReceipt.OperationId, operationId, StringComparison.Ordinal)
                 && !string.IsNullOrWhiteSpace(authoritativeReceipt.Receipt);
@@ -3445,7 +3183,7 @@ namespace JianghuYouling
             string outcome = unknown ? ("未知:" + intent + "的后端回执未确认；不会自动重试")
                 : (hasBackendReceipt && authoritativeReceipt.IsSucceeded && callbackSucceeded
                     ? OutcomeLine(intent, rawResult)
-                    : (hasBackendReceipt ? RecoveredOutcomeLine(intent, authoritativeReceipt)
+                    : (hasBackendReceipt ? ObservedOutcomeLine(intent, authoritativeReceipt)
                         : OutcomeLine(intent, rawResult)));
             journal.Status = hasBackendReceipt
                 ? (authoritativeReceipt.Status ?? "unknown").Trim().ToLowerInvariant()
@@ -3462,23 +3200,13 @@ namespace JianghuYouling
                 ? BuildAuthoritativeSagaStoryReceipt(journal, projectionEvidence, outcome) : null;
             journal.UpdatedUtcTicks = DateTime.UtcNow.Ticks;
             saga.LastOutcome = journal;
-            if (!unknown) saga.PendingOperationIds.Remove(operationId);
+            if (!unknown) saga.UnconfirmedOperationIds.Remove(operationId);
             ApplyOutcomeToSaga(saga, journal, args, date);
-            if (!EventSagaStore.Save(taiwuId, saga))
-            {
-                result.CheckpointOk = false;
-                result.Unknown = true;
-                result.ModelResult = "动作回执已观察，但终态 checkpoint 未能可靠存盘。";
-                LlmLog.RecordTrajectory("过月江湖事件 Agent", trace, tool, "unknown", operationId,
-                    "SAGA_SAVE_FAILED_AFTER_RECEIPT");
-                onDone?.Invoke(result); yield break;
-            }
+            SaveStoryHistory(saga);
             outcomes.Add(outcome);
             result.Unknown = unknown;
             result.Succeeded = !unknown && string.Equals(journal.Status, "succeeded", StringComparison.Ordinal);
-            // The durable journal keeps the typed receipt for recovery and truthful UI
-            // projection. Repeating its verbose manifest in every later model prompt no longer
-            // adds safety because monthly display prose cannot authorize or validate mutations.
+            // Facts remain in story history; record failures never change the observed outcome.
             result.ModelResult = outcome
                 + (unknown ? "\n终态未知，必须停止后续行动。"
                     : result.Succeeded ? "\n此动作已确认成功，可据此继续推进。"
@@ -3778,272 +3506,8 @@ namespace JianghuYouling
             return true;
         }
 
-        // JHYL_SAGA_OPERATION_RECONCILE_BOUNDED:先查 receipt；只有权威 operation_not_found 才按 durable
-        // 信封与同一 operationId 做一次恢复派发，其余 pending/unknown 一律继续隔离。
-        static IEnumerator ReconcileSagaPendingOperations(int taiwuId, EventSaga saga, int date, int generation,
-            List<string> recovered, Action<bool, bool> onDone)
-        {
-            if (saga == null || saga.PendingOperationIds == null) { onDone?.Invoke(false, false); yield break; }
-            bool anyTerminal = false;
-            var pending = new List<string>(saga.PendingOperationIds);
-            foreach (string operationId in pending)
-            {
-                if (!WorldLifecycle.IsSameWorld(generation)) { onDone?.Invoke(false, anyTerminal); yield break; }
-                if (!OperationId.IsValid(operationId))
-                {
-                    Debug.LogWarning("[江湖有灵] Saga pending operationId 损坏，保持 fail-closed:" + (operationId ?? "(空)"));
-                    continue;
-                }
-                EventSagaStepOutcome journal = FindSagaOutcome(saga, operationId);
-                if (journal == null)
-                {
-                    Debug.LogWarning("[江湖有灵] Saga pending 缺少对应 outcome journal，保持 fail-closed:" + operationId);
-                    continue;
-                }
-
-                ToolOutcome receipt = null; bool done = false;
-                EffectHandler.QueryOperation(saga.WorldId, saga.TaiwuId, operationId,
-                    value => { receipt = value; done = true; });
-                float deadline = Time.unscaledTime + OperationReconcileWaitSeconds;
-                while (!done && Time.unscaledTime < deadline && WorldLifecycle.IsSameWorld(generation)) yield return null;
-                if (!WorldLifecycle.IsSameWorld(generation)) { onDone?.Invoke(false, anyTerminal); yield break; }
-                if (!done || receipt == null)
-                {
-                    Debug.LogWarning("[江湖有灵] Saga receipt 查询超时，继续隔离:" + operationId);
-                    continue;
-                }
-
-                bool recoveryClaimed = journal.RecoveryDispatchCount == 1
-                    && string.Equals(journal.Code, "RECOVERY_DISPATCH_CLAIMED", StringComparison.Ordinal);
-                string redispatchResult = null;
-                EventToolProjectionEvidence redispatchEvidence = null;
-                if (IsOperationNotFound(receipt)
-                    && (journal.RecoveryDispatchCount == 0 || recoveryClaimed)
-                    && SagaEnvelopeMatchesJournal(saga, journal))
-                {
-                    if (!EffectHandler.PrepareOperationIdentity(saga.WorldId, saga.TaiwuId, operationId))
-                    { onDone?.Invoke(false, anyTerminal); yield break; }
-                    // 后端 operation journal 明确不存在，才允许用同 operationId 做一次恢复派发。
-                    // The claim is durable before dispatch.  If the process dies after
-                    // this checkpoint but before the RPC, a later authoritative
-                    // operation_not_found may resume the same claim with the same id.
-                    // If the RPC reached the backend, its pending/terminal receipt makes
-                    // operation_not_found impossible, so this cannot duplicate mutation.
-                    if (!recoveryClaimed)
-                    {
-                        journal.Status = "prepared";
-                        journal.Code = "RECOVERY_DISPATCH_CLAIMED";
-                        journal.RecoveryDispatchCount = 1;
-                        journal.Retryable = true;
-                        journal.UpdatedUtcTicks = DateTime.UtcNow.Ticks;
-                        saga.LastOutcome = journal;
-                        if (!EventSagaStore.Save(taiwuId, saga))
-                        { EffectHandler.DiscardPreparedOperation(operationId); onDone?.Invoke(false, anyTerminal); yield break; }
-                    }
-                    yield return ExecuteEventTool(journal.ToolName, journal.DispatchEnvelopeJson,
-                        saga.TaiwuId, journal.WorldDate, value => redispatchResult = value,
-                        value => redispatchEvidence = value, operationId);
-                    Debug.Log("[江湖有灵] Saga operation_not_found 已执行唯一一次恢复派发 op=" + operationId
-                        + " callback=" + (redispatchResult ?? "(空)"));
-                    if (!WorldLifecycle.IsSameWorld(generation)) { onDone?.Invoke(false, anyTerminal); yield break; }
-
-                    journal.Code = "RECOVERY_DISPATCH_ATTEMPTED";
-                    journal.UpdatedUtcTicks = DateTime.UtcNow.Ticks;
-                    saga.LastOutcome = journal;
-                    if (!EventSagaStore.Save(taiwuId, saga)) { onDone?.Invoke(false, anyTerminal); yield break; }
-
-                    receipt = null; done = false;
-                    EffectHandler.QueryOperation(saga.WorldId, saga.TaiwuId, operationId,
-                        value => { receipt = value; done = true; });
-                    deadline = Time.unscaledTime + OperationReconcileWaitSeconds;
-                    while (!done && Time.unscaledTime < deadline && WorldLifecycle.IsSameWorld(generation)) yield return null;
-                    if (!WorldLifecycle.IsSameWorld(generation)) { onDone?.Invoke(false, anyTerminal); yield break; }
-                    if (!done || receipt == null)
-                    {
-                        Debug.LogWarning("[江湖有灵] Saga 恢复派发后 receipt 查询超时，继续隔离:" + operationId);
-                        continue;
-                    }
-                }
-
-                if (receipt.IsSucceeded && (!string.Equals(receipt.OperationId, operationId, StringComparison.Ordinal)
-                    || string.IsNullOrWhiteSpace(receipt.Receipt)))
-                {
-                    receipt = new ToolOutcome
-                    {
-                        OperationId = operationId,
-                        Status = "unknown",
-                        Code = "AUTHORITATIVE_RECEIPT_MISSING_OR_MISMATCHED",
-                        Retryable = true,
-                        Message = "查询返回成功但缺少精确 operationId 的 durable backend receipt",
-                    };
-                }
-                string status = (receipt.Status ?? "unknown").Trim().ToLowerInvariant();
-                journal.Status = status;
-                journal.Code = receipt.Code ?? (receipt.IsTerminal ? "TERMINAL" : "RECEIPT_UNAVAILABLE");
-                journal.Receipt = receipt.Receipt;
-                journal.BackendReceiptStored = !string.IsNullOrWhiteSpace(receipt.Receipt);
-                journal.Retryable = receipt.Retryable;
-                journal.UpdatedUtcTicks = DateTime.UtcNow.Ticks;
-                saga.LastOutcome = journal;
-
-                if (receipt.IsTerminal)
-                {
-                    string intent = SagaIntent(journal);
-                    bool redispatchSucceeded = receipt.IsSucceeded
-                        && !string.IsNullOrWhiteSpace(redispatchResult)
-                        && redispatchResult.StartsWith("OK:", StringComparison.Ordinal);
-                    journal.Summary = redispatchSucceeded
-                        ? OutcomeLine(intent, redispatchResult) : RecoveredOutcomeLine(intent, receipt);
-                    journal.ProjectionAsset = null;
-                    // 进程可能在后端成功提交之后、前端收到投影证据之前退出。此时查询到的
-                    // durable receipt 已是权威终态，不能因为缺少瞬时 callback 就永远丢掉
-                    // 故事事实绑定。投影证据只从已持久化且通过 journal 校验的不可变派发
-                    // 信封重建；无法确定真实资产名的动作保持无投影，绝不猜测。
-                    EventToolProjectionEvidence terminalEvidence = redispatchEvidence
-                        ?? (receipt.IsSucceeded
-                            ? RebuildProjectionEvidenceFromJournal(saga, journal) : null);
-                    journal.StoryReceipt = receipt.IsSucceeded && terminalEvidence != null
-                        ? BuildAuthoritativeSagaStoryReceipt(journal, terminalEvidence, journal.Summary)
-                        : null;
-                    while (saga.PendingOperationIds.Remove(operationId)) { }
-                    JObject args;
-                    try { args = string.IsNullOrWhiteSpace(journal.ArgumentsJson) ? new JObject() : JObject.Parse(journal.ArgumentsJson); }
-                    catch { args = new JObject(); }
-                    ApplyOutcomeToSaga(saga, journal, args, journal.WorldDate > 0 ? journal.WorldDate : date);
-                    if (!EventSagaStore.Save(taiwuId, saga)) { onDone?.Invoke(false, anyTerminal); yield break; }
-                    if (recovered != null && !recovered.Contains(journal.Summary)) recovered.Add(journal.Summary);
-                    anyTerminal = true;
-                    Debug.Log("[江湖有灵] Saga receipt 已恢复终态 op=" + operationId + " status=" + status + " code=" + journal.Code);
-                }
-                else
-                {
-                    // pending / unknown / operation_not_found 都继续隔离；只持久化查询观察，不改写为失败。
-                    if (string.IsNullOrWhiteSpace(journal.DispatchEnvelopeJson))
-                    {
-                        Debug.LogWarning("[江湖有灵] Saga 旧格式 pending 缺派发信封；只查询、不猜测重放或升级覆盖 op=" + operationId);
-                        continue;
-                    }
-                    if (!EventSagaStore.Save(taiwuId, saga)) { onDone?.Invoke(false, anyTerminal); yield break; }
-                    Debug.LogWarning("[江湖有灵] Saga receipt 仍非终态 op=" + operationId + " status=" + status + " code=" + journal.Code);
-                }
-            }
-            onDone?.Invoke(true, anyTerminal);
-        }
-
-        static EventSagaStepOutcome FindSagaOutcome(EventSaga saga, string operationId)
-        {
-            if (saga == null || saga.OutcomeJournal == null || string.IsNullOrWhiteSpace(operationId)) return null;
-            for (int i = saga.OutcomeJournal.Count - 1; i >= 0; i--)
-            {
-                var item = saga.OutcomeJournal[i];
-                if (item != null && string.Equals(item.OperationId, operationId, StringComparison.Ordinal)) return item;
-            }
-            return null;
-        }
-
-        static int CollectUncommittedSagaOutcomes(EventSaga saga, List<string> recovered)
-        {
-            if (saga == null || saga.OutcomeJournal == null || recovered == null) return 0;
-            int added = 0;
-            foreach (var item in saga.OutcomeJournal)
-            {
-                if (item == null || string.IsNullOrWhiteSpace(item.StepId)
-                    || (item.Status != "succeeded" && item.Status != "failed" && item.Status != "rejected" && item.Status != "canceled"
-                        && !(item.Status == "unknown" && !item.Retryable))
-                    || item.ProjectionCommitted
-                    || string.IsNullOrWhiteSpace(item.Summary) || recovered.Contains(item.Summary)) continue;
-                recovered.Add(item.Summary);
-                added++;
-            }
-            return added;
-        }
-
-        static bool HasUnprojectedTerminalOutcome(EventSaga saga, int date)
-        {
-            if (saga == null || saga.OutcomeJournal == null) return false;
-            foreach (var item in saga.OutcomeJournal)
-                if (item != null && (date <= 0 || item.WorldDate == date) && !item.ProjectionCommitted
-                    && (item.Status == "succeeded" || item.Status == "failed" || item.Status == "rejected"
-                        || item.Status == "canceled" || item.Status == "unknown" && !item.Retryable))
-                    return true;
-            return false;
-        }
-
-        static bool TryRestoreCommittedSagaProjection(EventSaga saga, int date, out string projectionText)
-        {
-            projectionText = null;
-            if (saga == null || saga.OutcomeJournal == null) return false;
-            foreach (var item in saga.OutcomeJournal)
-                if (item != null && item.WorldDate == date && item.ProjectionCommitted
-                    && !string.IsNullOrWhiteSpace(item.ProjectionText))
-                {
-                    projectionText = item.ProjectionText;
-                    return true;
-                }
-            return false;
-        }
-
-        static void MarkSagaOutcomesProjected(EventSaga saga, int date, IList<string> projectedOutcomes,
-            string projectionText)
-        {
-            if (saga == null || saga.OutcomeJournal == null || string.IsNullOrWhiteSpace(projectionText)) return;
-            foreach (var item in saga.OutcomeJournal)
-            {
-                if (item == null || item.ProjectionCommitted) continue;
-                if (projectedOutcomes != null)
-                {
-                    if (string.IsNullOrWhiteSpace(item.Summary) || !projectedOutcomes.Contains(item.Summary)) continue;
-                }
-                else if (date > 0 && item.WorldDate != date) continue;
-                bool terminal = item.Status == "succeeded" || item.Status == "failed" || item.Status == "rejected"
-                    || item.Status == "canceled" || item.Status == "unknown" && !item.Retryable;
-                if (!terminal) continue;
-                item.ProjectionText = projectionText;
-                item.ProjectionCommitted = true;
-                item.UpdatedUtcTicks = DateTime.UtcNow.Ticks;
-            }
-        }
-
-        static void AcknowledgeProjectedSagaOutcomes(EventSaga saga)
-        {
-            if (saga == null || saga.OutcomeJournal == null) return;
-            bool markerChanged = false;
-            foreach (var item in saga.OutcomeJournal)
-            {
-                if (item == null || !item.ProjectionCommitted || !item.BackendReceiptStored
-                    || item.AckOutboxCommitted || string.IsNullOrWhiteSpace(item.Receipt)
-                    || !OperationId.IsValid(item.OperationId)) continue;
-                bool terminal = item.Status == "succeeded" || item.Status == "failed" || item.Status == "rejected"
-                    || item.Status == "canceled" || item.Status == "unknown" && !item.Retryable;
-                if (!terminal) continue;
-                string operationId = item.OperationId;
-                bool outboxCommitted = EffectHandler.AcknowledgeOperation(saga.WorldId, saga.TaiwuId, operationId, ok =>
-                {
-                    if (!ok) Debug.LogWarning("[江湖有灵] Saga 已投影终态 ACK 暂未完成 op=" + operationId);
-                });
-                if (outboxCommitted)
-                {
-                    item.AckOutboxCommitted = true;
-                    item.UpdatedUtcTicks = DateTime.UtcNow.Ticks;
-                    markerChanged = true;
-                }
-            }
-            if (markerChanged && !EventSagaStore.Save(saga.TaiwuId, saga))
-                Debug.LogWarning("[江湖有灵] Saga ACK outbox 已可靠接管，但本地接管标记暂未写回；下次会安全去重重试");
-        }
-
-        static string SagaIntent(EventSagaStepOutcome journal)
-        {
-            if (journal == null) return "这一步行动";
-            if (!string.IsNullOrWhiteSpace(journal.Intent)) return journal.Intent.Trim();
-            string value = (journal.Summary ?? "").Trim();
-            if (value.StartsWith("未知:", StringComparison.Ordinal)) value = value.Substring(3).Trim();
-            int suffix = value.IndexOf("的后端回执", StringComparison.Ordinal);
-            if (suffix > 0) value = value.Substring(0, suffix);
-            return string.IsNullOrWhiteSpace(value) ? ((journal.ToolName ?? "这一步") + "行动") : value;
-        }
-
-        static string RecoveredOutcomeLine(string intent, ToolOutcome receipt)
+        // Display only what this run observed; unknown is never promoted to failure or success.
+        static string ObservedOutcomeLine(string intent, ToolOutcome receipt)
         {
             string message = receipt == null ? null : (receipt.Message ?? "").Trim();
             if (receipt != null && string.Equals(receipt.Status, "unknown", StringComparison.OrdinalIgnoreCase))
@@ -4057,222 +3521,6 @@ namespace JianghuYouling
             string failureReason = !string.IsNullOrWhiteSpace(message) ? message
                 : (receipt == null || string.IsNullOrWhiteSpace(receipt.Code) ? "后端终态拒绝" : receipt.Code);
             return "失败:" + intent + "未成,原因:" + failureReason;
-        }
-
-        static bool IsOperationNotFound(ToolOutcome outcome)
-            => outcome != null && string.Equals(outcome.Code, "operation_not_found", StringComparison.OrdinalIgnoreCase);
-
-        static bool SagaEnvelopeMatchesJournal(EventSaga saga,
-            EventSagaStepOutcome journal)
-        {
-            if (journal == null || string.IsNullOrWhiteSpace(journal.DispatchEnvelopeJson)) return false;
-            try
-            {
-                if (!EventDispatchEnvelopeBinding.Matches(saga, journal))
-                    return false;
-                var envelope = JObject.Parse(journal.DispatchEnvelopeJson);
-                if (envelope.Value<int?>("_actorId") != journal.ActorId
-                    || envelope.Value<int?>("_targetId") != journal.TargetId
-                    || journal.ActorId <= 0 || journal.TargetId <= 0) return false;
-                if (journal.ActorId != journal.TargetId)
-                {
-                    if (!string.Equals(journal.ToolName, "event_secret",
-                        StringComparison.Ordinal)) return true;
-                    if (string.IsNullOrWhiteSpace(journal.ArgumentsJson)) return false;
-                    var secretArgs = JObject.Parse(journal.ArgumentsJson);
-                    return RecipientSecretDispatchEnvelope.MatchesFrozenArguments(
-                        envelope, secretArgs, journal.ActorId, journal.TargetId);
-                }
-                // Fame is deliberately a Taiwu self-target mutation. Recovery binds its
-                // immutable delta/reason/evidence envelope exactly. Legacy prepared
-                // records predate evidence_id, so a jointly absent field remains recoverable;
-                // every newly admitted fame dispatch always carries it after the gate above.
-                if (!string.Equals(journal.ToolName, "event_taiwu_fame", StringComparison.Ordinal)
-                    || string.IsNullOrWhiteSpace(journal.ArgumentsJson)) return false;
-                var args = JObject.Parse(journal.ArgumentsJson);
-                int delta = args.Value<int?>("delta") ?? 0;
-                string reason = (args["reason"]?.ToString() ?? "").Trim();
-                string evidenceId = (args["evidence_id"]?.ToString() ?? "").Trim();
-                string envelopeEvidenceId = (envelope["evidence_id"]?.ToString() ?? "").Trim();
-                bool evidenceMatches = evidenceId.Length == 0
-                    ? envelopeEvidenceId.Length == 0
-                    : string.Equals(envelopeEvidenceId, evidenceId, StringComparison.Ordinal);
-                return delta != 0 && delta % 3 == 0 && reason.Length >= 2 && evidenceMatches
-                    && envelope.Value<int?>("delta") == delta
-                    && string.Equals((envelope["reason"]?.ToString() ?? "").Trim(), reason,
-                        StringComparison.Ordinal);
-            }
-            catch { return false; }
-        }
-
-        static EventToolProjectionEvidence RebuildProjectionEvidenceFromJournal(
-            EventSaga saga, EventSagaStepOutcome journal)
-        {
-            if (journal == null || !SagaEnvelopeMatchesJournal(saga, journal)) return null;
-            try
-            {
-                JObject envelope = JObject.Parse(journal.DispatchEnvelopeJson);
-                string S(string key) => (envelope[key]?.ToString() ?? string.Empty).Trim();
-                int I(string key) => envelope.Value<int?>(key) ?? 0;
-                string asset = string.Empty;
-                int targetOverride = -1;
-                switch (journal.ToolName)
-                {
-                    case "event_taiwu_fame":
-                    {
-                        int delta = I("delta");
-                        if (delta == 0 || delta % 3 != 0) return null;
-                        asset = (delta > 0 ? "+" : string.Empty) + delta;
-                        targetOverride = journal.ActorId;
-                        break;
-                    }
-                    case "event_relate":
-                    {
-                        string kind = S("kind").ToLowerInvariant();
-                        asset = kind == "befriend" || kind == "mentor"
-                            || kind == "adoptive_parent" || kind == "adoptive_child"
-                            || kind == "lover" || kind == "spouse"
-                            ? kind : "sworn";
-                        break;
-                    }
-                    case "event_enmity":
-                        asset = string.Equals(S("make"), "false", StringComparison.OrdinalIgnoreCase) ? "化解" : "结仇";
-                        break;
-                    case "event_goto":
-                        asset = S("place"); targetOverride = 0; if (asset.Length == 0) return null; break;
-                    case "event_heal": asset = "疗伤"; break;
-                    case "event_detox": asset = "驱毒"; break;
-                    case "event_regulate_breath": asset = "调息"; break;
-                    case "event_favor":
-                    {
-                        int delta = I("delta"); if (delta == 0) return null;
-                        asset = (delta > 0 ? "+" : string.Empty) + delta; break;
-                    }
-                    case "event_mood":
-                    case "event_fame":
-                    {
-                        int delta = I("delta");
-                        if (delta == 0 || journal.ToolName == "event_mood"
-                                && (delta < -30 || delta > 30)
-                            || journal.ToolName == "event_fame"
-                                && (delta < -12 || delta > 12 || delta % 3 != 0))
-                            return null;
-                        asset = (delta > 0 ? "+" : string.Empty) + delta;
-                        break;
-                    }
-                    case "event_matchmake": asset = "spouse"; break;
-                    case "event_spend_night": asset = "春宵"; break;
-                    case "event_dissolve": asset = S("relation").ToLowerInvariant(); if (asset.Length == 0) return null; break;
-                    case "event_equipment":
-                    {
-                        string action = S("action").ToLowerInvariant();
-                        asset = action == "off" ? ("卸下" + S("part").ToLowerInvariant()) : ("换上" + S("item"));
-                        targetOverride = journal.ActorId;
-                        if (asset == "卸下" || asset == "换上") return null;
-                        break;
-                    }
-                    case "event_use_item":
-                        asset = S("item"); targetOverride = journal.ActorId;
-                        if (asset.Length == 0) return null;
-                        break;
-                    case "event_teach": asset = S("skill"); if (asset.Length == 0) return null; break;
-                    case "event_gift":
-                    {
-                        asset = S("item"); int amount = Math.Max(1, I("amount"));
-                        if (asset.Length == 0) return null;
-                        if (amount > 1) asset += "x" + amount;
-                        break;
-                    }
-                    case "event_gift_silver":
-                    {
-                        int amount = I("amount"); if (amount <= 0) return null;
-                        asset = "银钱" + amount; break;
-                    }
-                    case "event_barter":
-                    {
-                        string actorItem = S("_actorItem"), targetItem = S("_targetItem");
-                        if (actorItem.Length == 0 || targetItem.Length == 0) return null;
-                        asset = actorItem + "↔" + targetItem; break;
-                    }
-                    case "event_steal": asset = S("_targetItem"); if (asset.Length == 0) return null; break;
-                    case "event_poison":
-                    case "event_kill":
-                    case "event_capture":
-                        asset = string.Empty; break;
-                    default:
-                        // 写书、秘闻、特性、正逆练等动作的最终资产会由游戏权威层重新命名
-                        // 或补充结果，不能只凭请求参数重建。
-                        return null;
-                }
-                return new EventToolProjectionEvidence { Asset = asset, TargetIdOverride = targetOverride };
-            }
-            catch { return null; }
-        }
-
-        static bool RestoreCurrentDateOutcomes(EventSaga saga, int date, List<string> outcomes)
-        {
-            if (saga == null || saga.OutcomeJournal == null || outcomes == null) return false;
-            bool found = false;
-            foreach (var item in saga.OutcomeJournal)
-            {
-                if (item == null || item.WorldDate != date || string.IsNullOrWhiteSpace(item.Summary)) continue;
-                if (item.Status != "succeeded" && item.Status != "failed" && item.Status != "rejected"
-                    && item.Status != "canceled" && item.Status != "unknown" && item.Status != "prepared") continue;
-                string line = item.Status == "prepared"
-                    ? ("未知:" + item.Summary + "的执行可能已派发但未留下终态回执；不会自动重试")
-                    : item.Summary;
-                if (!outcomes.Contains(line)) outcomes.Add(line);
-                found = true;
-            }
-            if (found) Debug.Log("[江湖有灵] 过月事件:从 durable outcome journal 恢复 date=" + date + " 的结果，未重复派发副作用");
-            return found;
-        }
-
-        static bool TrySelectOpenLoopPair(EventSaga saga, List<KeyValuePair<int, string>> roster, int date, out int a, out int b)
-        {
-            a = b = 0;
-            if (saga == null || saga.OpenLoops == null || roster == null) return false;
-            EventSagaOpenLoop selected = null;
-            int selectedA = -1, selectedB = -1;
-            foreach (var loop in saga.OpenLoops)
-            {
-                if (loop == null || (loop.Kind != "hostility" && loop.Kind != "local_conflict")
-                    || loop.Status != "open" || loop.NextEligibleDate > date
-                    || loop.ParticipantIds == null || loop.ParticipantIds.Count < 2) continue;
-                int ai = -1, bi = -1;
-                foreach (int participant in loop.ParticipantIds)
-                {
-                    int index = roster.FindIndex(x => x.Key == participant);
-                    if (index < 0) continue;
-                    if (ai < 0) ai = index;
-                    else if (index != ai) { bi = index; break; }
-                }
-                if (ai < 0 || bi < 0 || ai == bi) continue;
-                // Hostility is the highest-risk unresolved fact and therefore gets the
-                // first reversible resolution attempt. Ties are stable across restarts.
-                if (selected == null || CompareOpenLoopPriority(loop, selected) < 0)
-                {
-                    selected = loop;
-                    selectedA = ai;
-                    selectedB = bi;
-                }
-            }
-            if (selected == null) return false;
-            a = selectedA + 1;
-            b = selectedB + 1;
-            return true;
-        }
-
-        static int CompareOpenLoopPriority(EventSagaOpenLoop x, EventSagaOpenLoop y)
-        {
-            int xKind = x != null && x.Kind == "hostility" ? 0 : 1;
-            int yKind = y != null && y.Kind == "hostility" ? 0 : 1;
-            int byKind = xKind.CompareTo(yKind);
-            if (byKind != 0) return byKind;
-            int byDate = (x == null ? int.MaxValue : x.NextEligibleDate)
-                .CompareTo(y == null ? int.MaxValue : y.NextEligibleDate);
-            return byDate != 0 ? byDate : string.Compare(x == null ? null : x.Id,
-                y == null ? null : y.Id, StringComparison.Ordinal);
         }
 
         static void ApplyOutcomeToSaga(EventSaga saga, EventSagaStepOutcome outcome, JObject args, int date)
@@ -4525,7 +3773,7 @@ namespace JianghuYouling
                         nameById[person.Key] = person.Value.Trim();
             foreach (EventSagaStepOutcome item in saga.OutcomeJournal)
             {
-                if (item == null || item.ProjectionCommitted || item.Status != "succeeded"
+                if (item == null || item.WorldDate != date || item.Status != "succeeded"
                     || !OperationId.IsValid(item.OperationId) || !projectedLines.Contains(item.Summary)) continue;
                 StoryProjectionReceipt receipt = item.StoryReceipt;
                 if (!SagaStoryReceiptMatchesJournal(item, receipt)) continue;
@@ -4654,9 +3902,8 @@ namespace JianghuYouling
 
         private static void EnsureGuaranteedMonthlyEvent(int taiwuId, int date)
         {
-            // EventLog is the first durable stage of the fanout transaction.  A network or
-            // projection interruption can happen after that stage but before _evText is assigned.
-            // Reuse the real story instead of adding a second, synthetic event for the same month.
+            // Reuse this run's archive or observed outcomes when an early exit occurred.
+            // An unknown action must not disappear behind an unrelated ambient story.
             try
             {
                 foreach (EventLogEntry existing in EventLogStore.Load(taiwuId))
@@ -4687,6 +3934,36 @@ namespace JianghuYouling
             }
 
             string area = string.IsNullOrWhiteSpace(_evArea) ? "太吾所在一带" : _evArea.Trim();
+            var observed = new List<string>();
+            bool unconfirmed = false;
+            if (_activeRunSaga != null)
+                foreach (EventSagaStepOutcome outcome in _activeRunSaga.OutcomeJournal)
+                {
+                    if (outcome.WorldDate != date) continue;
+                    bool unknown = outcome.Status == "unknown" || outcome.Status == "prepared";
+                    unconfirmed |= unknown;
+                    observed.Add(unknown ? ("未知:" + outcome.Intent + "的回执未确认；不会自动重试")
+                        : outcome.Summary);
+                }
+            if (observed.Count > 0)
+            {
+                const string unknownReason = "本月有动作结果尚未确认，后续行动已结束；已知结果保留，未知动作不会自动重试。";
+                _evText = string.Join("\n", observed.ToArray());
+                _evArea = area;
+                _evHeard = 0;
+                bool saved = EventLogStore.Upsert(taiwuId, new EventLogEntry
+                {
+                    EventId = "monthly-observed:" + WorldLifecycle.WorldId + ":" + taiwuId + ":" + date,
+                    Date = date, Area = area, Text = "", Detail = "",
+                    Brief = "本月行动已结束，以下为本次取得的结果。",
+                    Actions = observed, Heard = 0, StopReason = unconfirmed ? unknownReason : null,
+                    GenerationFailureReason = _eventFailureReason,
+                });
+                if (!saved) _activeRunSaga.RecordsIncomplete = true;
+                Debug.Log("[JHYL_MONTHLY_OBSERVED_RESULTS] count=" + observed.Count
+                    + " unknown=" + unconfirmed + " archived=" + saved);
+                return;
+            }
             string story = BuildGuaranteedAmbientEvent(area, date, taiwuId);
             string eventId = "monthly-guaranteed:" + WorldLifecycle.WorldId + ":" + taiwuId + ":" + date;
             var entry = new EventLogEntry
@@ -4695,13 +3972,19 @@ namespace JianghuYouling
                 Date = date,
                 Area = area,
                 Text = "",
-                Brief = "一桩没有牵动游戏状态、却已在当地留下余波的江湖见闻。",
+                Brief = string.IsNullOrWhiteSpace(_eventFailureReason)
+                    ? "一桩没有牵动游戏状态、却已在当地留下余波的江湖见闻。"
+                    : "本月江湖事件生成未完成，仅保留本地兜底见闻，没有执行事件动作。",
+                GenerationFailureReason = _eventFailureReason,
                 Detail = "",
                 Roster = "本地兜底见闻素材（只读事实线索）：\n" + story,
                 Actions = new List<string>(),
                 Heard = 0,
             };
             bool archived = EventLogStore.Upsert(taiwuId, entry);
+            if (!archived)
+                MonthlyChronicleProgressStore.WarnIncompleteRecords(taiwuId, date,
+                    "记录未完整保存：本月纪事归档写入失败，不会跨月自动补记。");
             _evText = story;
             _evArea = area;
             _evHeard = 0;
@@ -4781,319 +4064,42 @@ namespace JianghuYouling
             return Math.Max(0, (int)((Time.unscaledTime - started) * 1000f));
         }
 
-        static EventFanoutCheckpoint FindIncompleteEventFanout(EventSaga saga)
-        {
-            if (saga?.FanoutJournal == null) return null;
-            foreach (EventFanoutCheckpoint checkpoint in saga.FanoutJournal)
-                if (checkpoint != null && !checkpoint.ProjectionCommitted) return checkpoint;
-            return null;
-        }
-
-        static EventFanoutCheckpoint FindLatestEventFanout(EventSaga saga, int date)
-        {
-            if (saga?.FanoutJournal == null) return null;
-            for (int i = saga.FanoutJournal.Count - 1; i >= 0; i--)
-            {
-                EventFanoutCheckpoint checkpoint = saga.FanoutJournal[i];
-                if (checkpoint != null && checkpoint.WorldDate == date) return checkpoint;
-            }
-            return null;
-        }
-
-        static IEnumerator ValidateSagaProjectionAuthority(EventSaga saga,
-            EventFanoutCheckpoint checkpoint, int date, int generation,
-            Action<ProjectionAuthorityState> onDone)
-        {
-            if (saga == null || saga.WorldId == 0 || saga.TaiwuId <= 0
-                || saga.WorldId != WorldLifecycle.WorldId)
-            {
-                onDone?.Invoke(ProjectionAuthorityState.Unavailable);
-                yield break;
-            }
-
-            var expectedSucceeded = new HashSet<string>(StringComparer.Ordinal);
-            var checkpointIds = new HashSet<string>(checkpoint?.OutcomeOperationIds
-                ?? new List<string>(), StringComparer.Ordinal);
-            if (saga.OutcomeJournal != null)
-                foreach (EventSagaStepOutcome entry in saga.OutcomeJournal)
-                {
-                    if (entry == null || entry.WorldDate != date || entry.Status != "succeeded"
-                        || !OperationId.IsValid(entry.OperationId)) continue;
-                    if (checkpoint != null && checkpointIds.Count > 0
-                        && !checkpointIds.Contains(entry.OperationId)) continue;
-                    if (checkpoint == null && !entry.ProjectionCommitted) continue;
-                    expectedSucceeded.Add(entry.OperationId);
-                }
-
-            // A projection with no successful mutation is narrative-only. There is no game-state
-            // claim to revalidate, so restoring it cannot lie about an applied side effect.
-            foreach (string operationId in expectedSucceeded)
-            {
-                if (!WorldLifecycle.IsSameWorld(generation))
-                {
-                    onDone?.Invoke(ProjectionAuthorityState.Unavailable);
-                    yield break;
-                }
-                ToolOutcome outcome = null;
-                bool completed = false;
-                EffectHandler.QueryOperation(saga.WorldId, saga.TaiwuId, operationId,
-                    value => { outcome = value; completed = true; });
-                float deadline = Time.unscaledTime + OperationReconcileWaitSeconds;
-                while (!completed && Time.unscaledTime < deadline
-                    && WorldLifecycle.IsSameWorld(generation)) yield return null;
-                if (!completed || outcome == null || !WorldLifecycle.IsSameWorld(generation))
-                {
-                    onDone?.Invoke(ProjectionAuthorityState.Unavailable);
-                    yield break;
-                }
-                if (IsOperationNotFound(outcome) || outcome.IsTerminal && !outcome.IsSucceeded)
-                {
-                    onDone?.Invoke(ProjectionAuthorityState.StaleAfterSaveRollback);
-                    yield break;
-                }
-                if (!outcome.IsSucceeded
-                    || !string.Equals(outcome.OperationId, operationId, StringComparison.Ordinal))
-                {
-                    onDone?.Invoke(ProjectionAuthorityState.Unavailable);
-                    yield break;
-                }
-            }
-            onDone?.Invoke(ProjectionAuthorityState.Current);
-        }
-
         internal static bool PruneTimelineAtOrAfter(int taiwuId, int currentDate)
         {
-            if (taiwuId <= 0 || currentDate < 0) return false;
-            EventSaga stale = EventSagaStore.Load(taiwuId);
-            if (stale == null) return false;
-            if (!stale.LoadReliable)
-            {
-                // The game save has already rolled back, so ambiguous external replicas belong
-                // to the discarded timeline. Keeping them fail-closed here permanently blocks
-                // this save from generating its month again; the generic rollback pruner removes
-                // current/future monthly memories and chronicles immediately afterwards.
-                return EventSagaStore.DiscardUnreliableForSaveRollback(taiwuId);
-            }
-
-            var futureFanout = new List<EventFanoutCheckpoint>();
-            if (stale.FanoutJournal != null)
-                foreach (EventFanoutCheckpoint checkpoint in stale.FanoutJournal)
-                    if (checkpoint != null && checkpoint.WorldDate >= currentDate)
-                        futureFanout.Add(checkpoint);
-            bool hasFuture = stale.StartDate >= currentDate || stale.CompletedDate >= currentDate;
-            if (stale.OutcomeJournal != null)
-                foreach (EventSagaStepOutcome outcome in stale.OutcomeJournal)
-                    if (outcome != null && outcome.WorldDate >= currentDate) { hasFuture = true; break; }
-            if (futureFanout.Count > 0) hasFuture = true;
-            if (!hasFuture) return true;
-
-            // 先移除旧时间线向旁观者投射的月事件记忆，避免事件正文虽清掉，NPC 却仍
-            // 记得回档前才发生的结果。精确 SourceId 删除不会碰聊天或玩家自建记忆。
-            foreach (EventFanoutCheckpoint checkpoint in futureFanout)
-            {
-                if (checkpoint.RecipientIds == null || string.IsNullOrWhiteSpace(checkpoint.EventId)) continue;
-                foreach (int recipientId in checkpoint.RecipientIds)
+            EventSaga saga = EventSagaStore.Load(taiwuId);
+            if (saga == null || !saga.LoadReliable) return true;
+            bool future = saga.StartDate >= currentDate || saga.CompletedDate >= currentDate
+                || saga.OutcomeJournal.Exists(x => x.WorldDate >= currentDate)
+                || saga.ChapterDates.Exists(x => x >= currentDate);
+            if (!future) return true;
+            if (saga.StartDate >= currentDate) return EventSagaStore.Clear(taiwuId);
+            saga.OutcomeJournal.RemoveAll(x => x.WorldDate >= currentDate);
+            for (int i = saga.ChapterDates.Count - 1; i >= 0; i--)
+                if (saga.ChapterDates[i] >= currentDate)
                 {
-                    if (recipientId <= 0) continue;
-                    NpcMemoryStore memory = NpcMemoryStore.Load(JianghuYoulingPaths.Memories,
-                        taiwuId.ToString(), recipientId.ToString());
-                    if (!memory.LoadReliable) return false;
-                    memory.RemoveBySourceIds(new[] { checkpoint.EventId + ":" + recipientId });
-                    if (!memory.Save()) return false;
+                    saga.ChapterDates.RemoveAt(i);
+                    saga.Chapters.RemoveAt(i);
                 }
-            }
-
-            // 整条连载都从当前月才开始时，不保留标题、人物或大纲；重新过月应重新生成。
-            if (stale.StartDate >= currentDate)
+            saga.MonthsElapsed = saga.Chapters.Count;
+            saga.CompletedDate = 0;
+            saga.Active = saga.MonthsElapsed < saga.MonthsTotal;
+            saga.TaiwuInvolved = false;
+            saga.TaiwuFameEvidenceIds.Clear();
+            EventSagaOpenLoop origin = saga.OpenLoops.Find(x => x.Kind == "local_conflict");
+            saga.OpenLoops.Clear();
+            saga.OpenLoops.Add(new EventSagaOpenLoop
             {
-                bool cleared = EventSagaStore.Save(taiwuId, new EventSaga
-                {
-                    // 回档重建仍是对当前已提交 saga 的后继写入，必须携带磁盘 revision；
-                    // 从 0 起步会被并发保护正确判为陈旧写入，导致事件时间线无法裁剪。
-                    Revision = stale.Revision,
-                    WorldId = WorldLifecycle.WorldId,
-                    TaiwuId = taiwuId,
-                    Active = false,
-                    LoadReliable = true,
-                });
-                if (cleared) Debug.Log("[JHYL_MONTHLY_TIMELINE_PRUNED] event_saga reset boundary="
-                    + currentDate);
-                return cleared;
-            }
-
-            int retainedChapterCount = 0;
-            if (stale.FanoutJournal != null)
-                foreach (EventFanoutCheckpoint checkpoint in stale.FanoutJournal)
-                    if (checkpoint != null && checkpoint.WorldDate < currentDate
-                        && checkpoint.ChapterNumber > retainedChapterCount)
-                        retainedChapterCount = checkpoint.ChapterNumber;
-            retainedChapterCount = Math.Min(retainedChapterCount, stale.Chapters?.Count ?? 0);
-            var boundary = new EventFanoutCheckpoint
-            {
-                WorldDate = currentDate,
-                ChapterNumber = retainedChapterCount + 1,
-                EventId = "rollback-boundary:" + taiwuId + ":" + currentDate,
-                RecipientIds = new List<int>(),
-            };
-            bool rebuilt = ResetSagaAfterSaveRollback(stale, boundary, currentDate, out _);
-            if (rebuilt) Debug.Log("[JHYL_MONTHLY_TIMELINE_PRUNED] event_saga rebuilt boundary="
-                + currentDate + " retained_chapters=" + retainedChapterCount);
-            return rebuilt;
-        }
-
-        static bool ResetSagaAfterSaveRollback(EventSaga stale,
-            EventFanoutCheckpoint checkpoint, int date, out EventSaga fresh)
-        {
-            fresh = stale;
-            if (stale == null || stale.WorldId != WorldLifecycle.WorldId || stale.TaiwuId <= 0)
-                return false;
-            if (!EventLogStore.RemoveStoryProjectionAtDate(stale.TaiwuId, date)) return false;
-            MonthlyChronicleNoticeStore.NotifyArchiveChanged(stale.TaiwuId);
-
-            if (checkpoint?.RecipientIds != null && !string.IsNullOrWhiteSpace(checkpoint.EventId))
-            {
-                foreach (int recipientId in checkpoint.RecipientIds)
-                {
-                    if (recipientId <= 0) continue;
-                    try
-                    {
-                        NpcMemoryStore memory = NpcMemoryStore.Load(JianghuYoulingPaths.Memories,
-                            stale.TaiwuId.ToString(), recipientId.ToString());
-                        if (!memory.LoadReliable) return false;
-                        memory.RemoveBySourceIds(new[] { checkpoint.EventId + ":" + recipientId });
-                        if (!memory.Save()) return false;
-                    }
-                    catch (Exception e)
-                    {
-                        Debug.LogWarning("[JHYL_MONTHLY_STALE_FANOUT_CLEANUP_FAILED] npc="
-                            + recipientId + " exception=" + e.GetType().Name);
-                        return false;
-                    }
-                }
-            }
-
-            // The game save is authoritative for mutations, but the local saga still owns all
-            // chapters before this rolled-back month.  Replacing it with a blank EventSaga used
-            // to discard the first-chapter area, cast and prior prose, causing a continuation to
-            // silently move elsewhere.  Rebuild only the derived causal state from receipts that
-            // predate the rollback and retain the immutable series identity.
-            var retainedOutcomes = new List<EventSagaStepOutcome>();
-            if (stale.OutcomeJournal != null)
-                foreach (EventSagaStepOutcome outcome in stale.OutcomeJournal)
-                    if (outcome != null && outcome.WorldDate < date)
-                        retainedOutcomes.Add(outcome);
-
-            var retainedFanout = new List<EventFanoutCheckpoint>();
-            if (stale.FanoutJournal != null)
-                foreach (EventFanoutCheckpoint item in stale.FanoutJournal)
-                    if (item != null && item.WorldDate < date)
-                        retainedFanout.Add(item);
-
-            int retainedChapterCount = checkpoint != null && checkpoint.ChapterNumber > 0
-                ? Math.Min(stale.Chapters?.Count ?? 0, checkpoint.ChapterNumber - 1)
-                : Math.Min(stale.Chapters?.Count ?? 0, Math.Max(0, stale.MonthsElapsed - 1));
-            var retainedChapters = new List<string>();
-            for (int i = 0; i < retainedChapterCount; i++)
-                retainedChapters.Add(stale.Chapters[i]);
-
-            fresh = new EventSaga
-            {
-                Version = stale.Version,
-                Revision = stale.Revision,
-                WorldId = stale.WorldId,
-                TaiwuId = stale.TaiwuId,
-                LoadReliable = true,
-                Active = retainedChapterCount < stale.MonthsTotal,
-                Title = stale.Title,
-                Outline = stale.Outline,
-                AreaName = stale.AreaName,
-                AreaId = stale.AreaId,
-                ProtagonistIds = new List<int>(stale.ProtagonistIds ?? new List<int>()),
-                ProtagonistNames = new List<string>(stale.ProtagonistNames ?? new List<string>()),
-                Chapters = retainedChapters,
-                TaiwuInvolved = false,
-                TaiwuFameEvidenceIds = new List<string>(),
-                MonthsTotal = stale.MonthsTotal,
-                MonthsElapsed = retainedChapterCount,
-                StartDate = stale.StartDate,
-                CompletedDate = 0,
-                Constraints = new List<EventSagaConstraint>(),
-                OutcomeJournal = retainedOutcomes,
-                PendingOperationIds = new List<string>(),
-                FanoutJournal = retainedFanout,
-            };
-
-            if (stale.Constraints != null)
-                foreach (EventSagaConstraint constraint in stale.Constraints)
-                    if (constraint != null
-                        && !string.Equals(constraint.Kind, "high_risk_requires_hostility", StringComparison.Ordinal))
-                        fresh.Constraints.Add(new EventSagaConstraint
-                        {
-                            Id = constraint.Id,
-                            Kind = constraint.Kind,
-                            Value = constraint.Value,
-                            Active = constraint.Active,
-                        });
-
-            if (stale.Goal != null)
-                fresh.Goal = new EventSagaGoal
-                {
-                    Id = stale.Goal.Id,
-                    Summary = stale.Goal.Summary,
-                    SuccessCriteria = stale.Goal.SuccessCriteria,
-                    MinimumSucceededSteps = stale.Goal.MinimumSucceededSteps,
-                    Status = "active",
-                    UpdatedDate = stale.StartDate,
-                };
-
-            EventSagaOpenLoop original = null;
-            if (stale.OpenLoops != null)
-                foreach (EventSagaOpenLoop loop in stale.OpenLoops)
-                    if (loop != null && loop.Kind == "local_conflict")
-                    { original = loop; break; }
-            fresh.OpenLoops.Add(new EventSagaOpenLoop
-            {
-                Id = original?.Id ?? ("loop-origin-" + stale.StartDate),
-                Kind = "local_conflict",
-                Summary = original?.Summary ?? "事件人物之间的矛盾尚待真实行动展开",
-                Status = "open",
-                ParticipantIds = new List<int>(original?.ParticipantIds
-                    ?? stale.ProtagonistIds ?? new List<int>()),
-                EvidenceIds = new List<string>(),
-                NextEligibleDate = stale.StartDate,
+                Id = origin?.Id ?? ("loop-origin-" + saga.StartDate),
+                Kind = "local_conflict", Summary = origin?.Summary ?? "本地风波尚待推进",
+                ParticipantIds = new List<int>(saga.ProtagonistIds), NextEligibleDate = saga.StartDate,
             });
-
-            foreach (EventSagaStepOutcome outcome in retainedOutcomes)
-            {
-                JObject args = null;
-                try
-                {
-                    if (!string.IsNullOrWhiteSpace(outcome.ArgumentsJson))
-                        args = JObject.Parse(outcome.ArgumentsJson);
-                }
-                catch { args = new JObject(); }
-                ApplyOutcomeToSaga(fresh, outcome, args ?? new JObject(), outcome.WorldDate);
-                if (outcome.Status == "prepared" || outcome.Status == "pending"
-                    || outcome.Status == "unknown" && outcome.Retryable)
-                    fresh.PendingOperationIds.Add(outcome.OperationId);
-            }
-            fresh.LastOutcome = retainedOutcomes.Count == 0
-                ? null : retainedOutcomes[retainedOutcomes.Count - 1];
-            RefreshSagaGoalEvidence(fresh);
-            return EventSagaStore.Save(fresh.TaiwuId, fresh);
-        }
-
-        static EventFanoutCheckpoint FindCommittedEventFanout(EventSaga saga, int date)
-        {
-            if (saga?.FanoutJournal == null) return null;
-            for (int i = saga.FanoutJournal.Count - 1; i >= 0; i--)
-            {
-                EventFanoutCheckpoint checkpoint = saga.FanoutJournal[i];
-                if (checkpoint != null && checkpoint.WorldDate == date
-                    && checkpoint.ProjectionCommitted
-                    && EventFanoutPolicy.ReadyForProjection(checkpoint)) return checkpoint;
-            }
-            return null;
+            foreach (EventSagaStepOutcome outcome in saga.OutcomeJournal)
+                ApplyOutcomeToSaga(saga, outcome, null, outcome.WorldDate);
+            saga.LastOutcome = saga.OutcomeJournal.Count == 0 ? null
+                : saga.OutcomeJournal[saga.OutcomeJournal.Count - 1];
+            if (saga.Goal != null) saga.Goal.Status = "active";
+            RefreshSagaGoalEvidence(saga);
+            return EventSagaStore.Save(taiwuId, saga);
         }
 
         static IEnumerator BuildEventFanoutRecipients(short eventArea, short twArea,
@@ -5139,211 +4145,49 @@ namespace JianghuYouling
             onDone?.Invoke(recipients);
         }
 
-        static EventFanoutCheckpoint PrepareEventFanout(EventSaga saga, string eventId,
-            short eventArea, int date, string areaName, string storyText, string projectionText,
-            string roster, IList<string> actions, IList<int> recipients, int chapterNumber,
-            bool finale)
+        static IEnumerator DeliverEventRecords(EventSaga saga, MonthlyEventDelivery delivery,
+            int taiwuId, CancellationToken cancellationToken)
         {
-            if (saga == null || saga.FanoutJournal == null || string.IsNullOrWhiteSpace(eventId)
-                || eventId.Length > 256
-                || string.IsNullOrWhiteSpace(storyText) || string.IsNullOrWhiteSpace(projectionText)
-                || actions == null || actions.Count > EventFanoutPolicy.MaxActions
-                || recipients == null || recipients.Count > EventFanoutPolicy.MaxRecipients)
-                return null;
-
-            var frozenActions = new List<string>();
-            foreach (string action in actions)
-                if (!string.IsNullOrWhiteSpace(action)) frozenActions.Add(action.Trim());
-            var frozenRecipients = new List<int>();
-            var seenRecipients = new HashSet<int>();
-            foreach (int recipient in recipients)
-                if (recipient > 0 && recipient != saga.TaiwuId && seenRecipients.Add(recipient))
-                    frozenRecipients.Add(recipient);
-            frozenRecipients.Sort();
-
-            var actionSet = new HashSet<string>(frozenActions, StringComparer.Ordinal);
-            var operationIds = new List<string>();
-            if (saga.OutcomeJournal != null)
-                foreach (EventSagaStepOutcome outcome in saga.OutcomeJournal)
-                {
-                    if (outcome == null || outcome.ProjectionCommitted
-                        || !OperationId.IsValid(outcome.OperationId)
-                        || !IsTerminalSagaOutcome(outcome)
-                        || string.IsNullOrWhiteSpace(outcome.Summary)
-                        || !actionSet.Contains(outcome.Summary)) continue;
-                    if (!operationIds.Contains(outcome.OperationId)) operationIds.Add(outcome.OperationId);
-                }
-            operationIds.Sort(StringComparer.Ordinal);
-            if (operationIds.Count > EventFanoutPolicy.MaxOutcomeOperations) return null;
-
-            foreach (EventFanoutCheckpoint existing in saga.FanoutJournal)
+            int processed = 0;
+            foreach (int recipientId in delivery.RecipientIds)
             {
-                if (existing == null || !string.Equals(existing.EventId, eventId, StringComparison.Ordinal)) continue;
-                if (existing.WorldDate != date || existing.AreaId != eventArea
-                    || existing.ChapterNumber != chapterNumber || existing.Finale != finale
-                    || !string.Equals(existing.AreaName ?? "", areaName ?? "", StringComparison.Ordinal)
-                    || !string.Equals(existing.StoryText ?? "", storyText ?? "", StringComparison.Ordinal)
-                    || !string.Equals(existing.ProjectionText ?? "", projectionText ?? "", StringComparison.Ordinal)
-                    || !string.Equals(existing.Roster ?? "", roster ?? "", StringComparison.Ordinal)
-                    || !SameSequence(existing.Actions, frozenActions)
-                    || !SameSequence(existing.OutcomeOperationIds, operationIds)
-                    || !SameSequence(existing.RecipientIds, frozenRecipients)) return null;
-                return existing;
-            }
-
-            var checkpoint = new EventFanoutCheckpoint
-            {
-                EventId = eventId,
-                WorldDate = date,
-                AreaId = eventArea,
-                AreaName = areaName ?? "",
-                StoryText = storyText,
-                ProjectionText = projectionText,
-                Roster = roster ?? "",
-                Actions = frozenActions,
-                OutcomeOperationIds = operationIds,
-                RecipientIds = frozenRecipients,
-                CompletedRecipientIds = new List<int>(),
-                ChapterNumber = chapterNumber,
-                Finale = finale,
-                UpdatedUtcTicks = DateTime.UtcNow.Ticks,
-            };
-            if (!EventFanoutPolicy.IsValid(checkpoint)) return null;
-            saga.FanoutJournal.Add(checkpoint);
-            return checkpoint;
-        }
-
-        static bool SameSequence<T>(IList<T> left, IList<T> right)
-        {
-            if (left == null || right == null || left.Count != right.Count) return false;
-            var comparer = EqualityComparer<T>.Default;
-            for (int i = 0; i < left.Count; i++)
-                if (!comparer.Equals(left[i], right[i])) return false;
-            return true;
-        }
-
-        static IEnumerator CommitPreparedEventFanout(EventSaga saga, EventFanoutCheckpoint checkpoint,
-            int taiwuId, Action<bool> onDone)
-        {
-            if (saga == null || checkpoint == null || !FanoutWorldIsCurrent(saga, taiwuId)
-                || saga.FanoutJournal == null || !saga.FanoutJournal.Contains(checkpoint)
-                || !EventFanoutPolicy.IsValid(checkpoint))
-            {
-                LogFanoutFailure(checkpoint, "invalid_checkpoint_or_world");
-                onDone?.Invoke(false);
-                yield break;
-            }
-
-            if (!EventLogStore.EnsureFanoutEntry(taiwuId, checkpoint))
-            {
-                LogFanoutFailure(checkpoint, "event_log_commit");
-                onDone?.Invoke(false);
-                yield break;
-            }
-            if (!checkpoint.EventLogCommitted)
-            {
-                checkpoint.EventLogCommitted = true;
-                checkpoint.UpdatedUtcTicks = DateTime.UtcNow.Ticks;
-                if (!EventSagaStore.Save(taiwuId, saga))
-                {
-                    checkpoint.EventLogCommitted = false;
-                    LogFanoutFailure(checkpoint, "event_log_checkpoint");
-                    onDone?.Invoke(false);
+                if (cancellationToken.IsCancellationRequested || !FanoutWorldIsCurrent(saga, taiwuId))
                     yield break;
-                }
-            }
-
-            int written = 0;
-            bool memoryIncomplete = false;
-            foreach (int recipientId in EventFanoutPolicy.PendingRecipients(checkpoint))
-            {
-                if (!FanoutWorldIsCurrent(saga, taiwuId))
-                {
-                    LogFanoutFailure(checkpoint, "world_changed", recipientId);
-                    onDone?.Invoke(false);
-                    yield break;
-                }
-                string sourceId = checkpoint.EventId + ":" + recipientId;
-                bool committed = EventFanoutMemoryWriter.TryCommit(JianghuYoulingPaths.Memories,
+                bool saved = EventFanoutMemoryWriter.TryCommit(JianghuYoulingPaths.Memories,
                     taiwuId, recipientId, new MemoryEntry
+                    {
+                        Content = BuildEventOutcomeMemory(saga, delivery, recipientId),
+                        Type = MemoryType.Event, Keywords = "江湖事件,工具结果," + delivery.AreaName,
+                        Importance = 3, WorldDate = delivery.WorldDate, Valid = true,
+                        SourceKind = "monthly_event_fanout",
+                        SourceId = delivery.EventId + ":" + recipientId,
+                    }, out string failure);
+                if (saved) delivery.Heard++;
+                else
                 {
-                    Content = BuildEventOutcomeMemory(saga, checkpoint, recipientId),
-                    Type = MemoryType.Event,
-                    Keywords = "江湖事件,工具结果," + checkpoint.AreaName,
-                    Importance = 3,
-                    WorldDate = checkpoint.WorldDate,
-                    Valid = true,
-                    SourceKind = "monthly_event_fanout",
-                    SourceId = sourceId,
-                }, out string memoryFailure);
-                if (!committed)
-                {
-                    LogFanoutFailure(checkpoint, memoryFailure, recipientId);
-                    memoryIncomplete = true;
+                    saga.RecordsIncomplete = true;
+                    Debug.LogWarning("[JHYL_EVENT_RECORD_INCOMPLETE] npc=" + recipientId
+                        + " reason=" + failure + " repair=false");
                 }
-                else if (!EventFanoutPolicy.MarkRecipientCommitted(checkpoint, recipientId))
-                {
-                    LogFanoutFailure(checkpoint, "recipient_checkpoint_invalid", recipientId);
-                    onDone?.Invoke(false);
-                    yield break;
-                }
-                else if (!EventSagaStore.Save(taiwuId, saga))
-                {
-                    checkpoint.CompletedRecipientIds.Remove(recipientId);
-                    LogFanoutFailure(checkpoint, "recipient_checkpoint_save", recipientId);
-                    onDone?.Invoke(false);
-                    yield break;
-                }
-                // A temporarily unreadable NPC must not starve every later recipient. Its own
-                // checkpoint stays pending, and projection/ACK still wait for all recipients.
-                if (++written % 5 == 0) yield return null;
+                if (++processed % 5 == 0) yield return null;
             }
-
-            if (memoryIncomplete)
-            {
-                onDone?.Invoke(false);
+            if (cancellationToken.IsCancellationRequested || !FanoutWorldIsCurrent(saga, taiwuId))
                 yield break;
-            }
-            if (!FanoutWorldIsCurrent(saga, taiwuId))
-            {
-                LogFanoutFailure(checkpoint, "world_changed");
-                onDone?.Invoke(false);
-                yield break;
-            }
-            int heard = checkpoint.CompletedRecipientIds.Count;
-            if (!EventLogStore.TryUpdateHeard(taiwuId, checkpoint.EventId, heard))
-            {
-                LogFanoutFailure(checkpoint, "heard_commit");
-                onDone?.Invoke(false);
-                yield break;
-            }
-            if (!checkpoint.HeardCommitted)
-            {
-                bool previousFanoutCompleted = checkpoint.FanoutCompleted;
-                checkpoint.FanoutCompleted = true;
-                checkpoint.Heard = heard;
-                checkpoint.HeardCommitted = true;
-                checkpoint.UpdatedUtcTicks = DateTime.UtcNow.Ticks;
-                if (!EventSagaStore.Save(taiwuId, saga))
-                {
-                    checkpoint.FanoutCompleted = previousFanoutCompleted;
-                    checkpoint.Heard = 0;
-                    checkpoint.HeardCommitted = false;
-                    LogFanoutFailure(checkpoint, "heard_checkpoint");
-                    onDone?.Invoke(false);
-                    yield break;
-                }
-            }
-            onDone?.Invoke(EventFanoutPolicy.ReadyForProjection(checkpoint));
+            if (!EventLogStore.SaveMonthlyEvent(taiwuId, delivery, _eventFailureReason)) saga.RecordsIncomplete = true;
         }
 
-        static void LogFanoutFailure(EventFanoutCheckpoint checkpoint, string stage, int recipientId = 0)
-            => Debug.LogWarning("[JHYL_EVENT_FANOUT_PENDING] event=" + (checkpoint?.EventId ?? "missing")
-                + " date=" + (checkpoint?.WorldDate ?? -1) + " stage=" + stage
-                + " npc=" + recipientId + " remaining=" + EventFanoutPolicy.PendingRecipients(checkpoint).Count);
+        static void SaveStoryHistory(EventSaga saga)
+        {
+            if (!EventSagaStore.Save(saga.TaiwuId, saga))
+            {
+                saga.RecordsIncomplete = true;
+                Debug.LogWarning("[JHYL_EVENT_STORY_RECORD_INCOMPLETE] date="
+                    + saga.LastOutcome?.WorldDate + " repair=false");
+            }
+        }
 
         static string BuildEventOutcomeMemory(EventSaga saga,
-            EventFanoutCheckpoint checkpoint, int recipientId)
+            MonthlyEventDelivery checkpoint, int recipientId)
         {
             var content = new StringBuilder("本月江湖事件真实工具结果：");
             var operationIds = new HashSet<string>(
@@ -5386,7 +4230,7 @@ namespace JianghuYouling
         }
 
         static string BuildAuthoritativeChapterContinuity(EventSaga saga,
-            EventFanoutCheckpoint checkpoint)
+            MonthlyEventDelivery checkpoint)
         {
             var content = new StringBuilder("【权威工具连续性】");
             var operationIds = new HashSet<string>(
@@ -5415,76 +4259,31 @@ namespace JianghuYouling
             => saga != null && taiwuId > 0 && saga.TaiwuId == taiwuId && saga.WorldId > 0
                 && WorldLifecycle.HasWorldIdentity && saga.WorldId == WorldLifecycle.WorldId;
 
-        static bool FinalizeEventProjectionAfterFanout(EventSaga saga,
-            EventFanoutCheckpoint checkpoint)
+        static void CompleteStoryChapter(EventSaga saga, MonthlyEventDelivery delivery)
         {
-            if (saga == null || checkpoint == null || saga.TaiwuId <= 0
-                || saga.WorldId == 0 || saga.WorldId != WorldLifecycle.WorldId
-                || saga.FanoutJournal == null || !saga.FanoutJournal.Contains(checkpoint)
-                || !EventFanoutPolicy.ReadyForProjection(checkpoint)) return false;
-            if (checkpoint.ProjectionCommitted)
+            if (delivery.ChapterNumber <= 0) return;
+            saga.Chapters.Add(BuildAuthoritativeChapterContinuity(saga, delivery));
+            saga.ChapterDates.Add(delivery.WorldDate);
+            saga.MonthsElapsed = delivery.ChapterNumber;
+            saga.TaiwuInvolved = false;
+            saga.TaiwuFameEvidenceIds.Clear();
+            if (saga.Goal != null) saga.Goal.UpdatedDate = delivery.WorldDate;
+            if (delivery.Finale)
             {
-                // Never treat an in-memory flag left behind by a failed Save as durable.  Reload
-                // the exact world-scoped checkpoint before ACK transfers cleanup responsibility.
-                EventSaga durable = EventSagaStore.Load(saga.TaiwuId);
-                EventFanoutCheckpoint durableCheckpoint = null;
-                if (durable != null && durable.LoadReliable && durable.WorldId == saga.WorldId
-                    && durable.FanoutJournal != null)
-                    foreach (EventFanoutCheckpoint candidate in durable.FanoutJournal)
-                        if (candidate != null && string.Equals(candidate.EventId,
-                            checkpoint.EventId, StringComparison.Ordinal))
-                        { durableCheckpoint = candidate; break; }
-                if (durableCheckpoint == null || !durableCheckpoint.ProjectionCommitted
-                    || !EventFanoutPolicy.ReadyForProjection(durableCheckpoint)) return false;
-                AcknowledgeProjectedSagaOutcomes(durable);
-                return true;
+                CloseSagaOpenLoopsAtFinale(saga, delivery.WorldDate);
+                RefreshSagaGoalEvidence(saga);
+                if (saga.Goal != null)
+                    saga.Goal.Status = saga.Goal.SucceededSteps >= saga.Goal.MinimumSucceededSteps
+                        && !HasOpenSagaLoop(saga) ? "achieved" : "failed";
+                saga.Active = false;
+                saga.CompletedDate = delivery.WorldDate;
             }
-
-            if (checkpoint.ChapterNumber > 0 && saga.MonthsElapsed < checkpoint.ChapterNumber)
+            else
             {
-                if (saga.Chapters == null) saga.Chapters = new List<string>();
-                // Player-facing literature is display-only. Persist only code-owned terminal
-                // receipts for the next month, so unchecked prose can never be promoted into
-                // a future decision prompt.
-                saga.Chapters.Add(BuildAuthoritativeChapterContinuity(saga, checkpoint));
-                saga.MonthsElapsed = checkpoint.ChapterNumber;
-                saga.TaiwuInvolved = false;
-                saga.TaiwuFameEvidenceIds?.Clear();
-                if (saga.Goal != null) saga.Goal.UpdatedDate = checkpoint.WorldDate;
-                if (checkpoint.Finale)
-                {
-                    CloseSagaOpenLoopsAtFinale(saga, checkpoint.WorldDate);
-                    RefreshSagaGoalEvidence(saga);
-                    if (saga.Goal != null)
-                        saga.Goal.Status = saga.Goal.SucceededSteps >= saga.Goal.MinimumSucceededSteps
-                            && !HasOpenSagaLoop(saga) ? "achieved" : "failed";
-                    saga.Active = false;
-                    saga.CompletedDate = checkpoint.WorldDate;
-                }
-                else
-                {
-                    RefreshSagaGoalEvidence(saga);
-                    if (saga.Goal != null) saga.Goal.Status = "active";
-                }
+                RefreshSagaGoalEvidence(saga);
+                if (saga.Goal != null) saga.Goal.Status = "active";
             }
-
-            var operationIds = new HashSet<string>(checkpoint.OutcomeOperationIds
-                ?? new List<string>(), StringComparer.Ordinal);
-            if (saga.OutcomeJournal != null)
-                foreach (EventSagaStepOutcome outcome in saga.OutcomeJournal)
-                {
-                    if (outcome == null || outcome.ProjectionCommitted
-                        || !operationIds.Contains(outcome.OperationId)
-                        || !IsTerminalSagaOutcome(outcome)) continue;
-                    outcome.ProjectionText = checkpoint.ProjectionText;
-                    outcome.ProjectionCommitted = true;
-                    outcome.UpdatedUtcTicks = DateTime.UtcNow.Ticks;
-                }
-            checkpoint.ProjectionCommitted = true;
-            checkpoint.UpdatedUtcTicks = DateTime.UtcNow.Ticks;
-            if (!EventSagaStore.Save(saga.TaiwuId, saga)) return false;
-            AcknowledgeProjectedSagaOutcomes(saga);
-            return true;
+            SaveStoryHistory(saga);
         }
 
         static IEnumerator BuildEventDispatchEnvelope(string tool, JObject args,

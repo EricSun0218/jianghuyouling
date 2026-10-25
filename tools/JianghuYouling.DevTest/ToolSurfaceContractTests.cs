@@ -992,24 +992,18 @@ namespace JianghuYouling.DevTest
             if (!monthly.Contains("DispatchEnvelopeBinding.CreateDigest(dispatchEnvelope)")
                 || !monthly.Contains(
                     "DispatchEnvelopeBinding.CreateOperationId(")
-                || !monthly.Contains("OperationBindingKey = operationBindingKey")
-                || !monthly.Contains("DispatchEnvelopeDigest = dispatchEnvelopeDigest")
+                || !monthly.Contains("operationBindingKey, dispatchEnvelopeDigest)")
                 || !monthly.Contains("boundEnvelope[\"_tool\"] = tool")
                 || !monthly.Contains("EventDispatchEnvelopeBinding.CreateStableKey(")
-                || !monthly.Contains("EventDispatchEnvelopeBinding.Matches(saga, journal)")
-                || !sagaStore.Contains("public string OperationBindingKey;")
-                || !sagaStore.Contains("public string DispatchEnvelopeDigest;")
-                || !sagaStore.Contains("envelope[\"_tool\"]")
-                || !sagaStore.Contains("outcome.ToolName")
-                || !sagaStore.Contains("string expectedKey = CreateStableKey(")
-                || !sagaStore.Contains("DispatchEnvelopeBinding.Matches(item.OperationBindingKey")
+                || sagaStore.Contains("public string OperationBindingKey;")
+                || sagaStore.Contains("public string DispatchEnvelopeDigest;")
+                || sagaStore.Contains("public string DispatchEnvelopeJson;")
                 || !companion.Contains("DispatchEnvelopeBinding.CreateDigest(envelope)")
                 || !companion.Contains(
                     "DispatchEnvelopeBinding.CreateOperationId(")
-                || !companion.Contains(
-                    "DispatchEnvelopeBinding.Matches(\"companion|\" + entry.MutationKey"))
+                || !companion.Contains("EffectHandler.PrepareOperationIdentity(worldId, snap.TaiwuId, operationId)"))
                 throw new InvalidOperationException(
-                    "月度 crash recovery 未把完整派发信封摘要与 operationId 交叉绑定");
+                    "月度首次派发必须绑定完整信封与 operationId，但不得持久保存重放信封");
 
             if (!monthly.Contains("recipientSecretSelections.Clear();")
                 || !monthly.Contains("queriedFacts.Clear();")
@@ -1017,9 +1011,9 @@ namespace JianghuYouling.DevTest
                 || !monthly.Contains("recipientId != authority.ActorId")
                 || !monthly.Contains("recipientId != authority.TargetId")
                 || !monthly.Contains("并不知道秘闻内容")
-                || !monthly.Contains("BuildAuthoritativeChapterContinuity(saga, checkpoint)")
+                || !monthly.Contains("BuildAuthoritativeChapterContinuity(saga, delivery)")
                 || !monthly.Contains("旧版文学正文已隔离")
-                || monthly.Contains("saga.Chapters.Add(checkpoint.StoryText)"))
+                || monthly.Contains("saga.Chapters.Add(delivery.StoryText)"))
                 throw new InvalidOperationException(
                     "秘闻权限缓存/扇出或江湖事件连续性仍可能泄漏旧秘闻与未经验证的展示正文");
 
@@ -1078,7 +1072,7 @@ namespace JianghuYouling.DevTest
                 "private static bool IsCompanionQueryTool(");
             if (!companionLoop.Contains("本月不设工具动作次数额度")
                 || !companion.Contains("MaxAgentRounds = 12")
-                || !companion.Contains("MaxJournalStepsPerBatch = 64")
+                || companion.Contains("MaxJournalStepsPerBatch")
                 || !companion.Contains("MonthlyAgentRequestBudget.TryAcquire")
                 || !companion.Contains("JHYL_COMPANION_CAUSAL_REVIEW_ONLY_AFTER_NO_TOOL_DRAFT")
                 || companion.Contains("ShouldInvokePlanner(")
@@ -1137,7 +1131,7 @@ namespace JianghuYouling.DevTest
                 || loop.Contains("TryAcceptMonthlyAgentNarrative(turn.Content")
                 || !loop.Contains("MonthlyPreMinimumProgressFuse(3)")
                 || !loop.Contains("MonthlyPostMinimumProgressFuse(2)")
-                || !monthly.Contains("Content = BuildEventOutcomeMemory(saga, checkpoint, recipientId)")
+                || !monthly.Contains("Content = BuildEventOutcomeMemory(saga, delivery, recipientId)")
                 || !companionLoop.Contains("authoritative_outcomes_only")
                 || !companionLoop.Contains("finalNarrative = DeterministicStory(result, null)")
                 || companionLoop.Contains("TryAcceptCompanionAgentNarrative(turn.Content")

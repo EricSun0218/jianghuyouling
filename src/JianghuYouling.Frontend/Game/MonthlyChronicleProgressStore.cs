@@ -16,6 +16,7 @@ namespace JianghuYouling
         public bool CompanionExpected;
         public bool CompanionDone;
         public string StopReason;
+        public string RecordWarning;
 
         public bool IsGenerating => EventExpected && !EventDone
             || CompanionExpected && !CompanionDone;
@@ -60,8 +61,17 @@ namespace JianghuYouling
                     && Values.TryGetValue(key, out MonthlyChronicleProgress existing)
                     && existing != null && !string.IsNullOrWhiteSpace(existing.StopReason))
                     value.StopReason = existing.StopReason;
+                if (Values.TryGetValue(key, out MonthlyChronicleProgress previous))
+                    value.RecordWarning = previous.RecordWarning;
                 Values[key] = value;
             }
+        }
+
+        public static void WarnIncompleteRecords(int taiwuId, int date, string warning)
+        {
+            lock (Gate)
+                if (TryGet(taiwuId, date, out MonthlyChronicleProgress value))
+                    value.RecordWarning = warning;
         }
 
         public static bool TryGet(int taiwuId, int date, out MonthlyChronicleProgress value)

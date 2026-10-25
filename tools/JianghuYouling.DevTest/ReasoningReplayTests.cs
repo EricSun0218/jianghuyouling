@@ -390,6 +390,10 @@ namespace JianghuYouling.DevTest
         private static async Task LiveProbe(OpenAiCompatibleClient client, List<LlmMessage> messages,
             int step, LlmReasoningPolicy policy)
         {
+            // This fixture verifies thinking replay. Pro intentionally disables thinking
+            // for Low; keep its supported Auto mode while Flash also exercises Low.
+            if (policy == LlmReasoningPolicy.Low && client.UsesDeepSeekV4ProThinkingProtocol)
+                policy = LlmReasoningPolicy.Auto;
             RequireThinkingTools(Body(client, messages, policy), "live step " + step);
             LlmToolResult result = await client.SendToolRoundAsync(messages, Tools, "auto", 2048, 0.0,
                 default, 90, "Reasoning replay tool fixture", false, policy);

@@ -178,7 +178,7 @@ namespace JianghuYouling.DevTest
             {
                 TestConversationNavigationStore();
                 TestConversationSessionIndexStore();
-                TestCompanionMutationJournalReplicaMigration();
+                TestCurrentCommitReplicaPair();
                 TestConversationSidebarSourceContracts();
                 return 0;
             }
@@ -259,7 +259,7 @@ namespace JianghuYouling.DevTest
 
             if (args != null && Array.Exists(args, a => string.Equals(a, "--saga-only", StringComparison.OrdinalIgnoreCase)))
             {
-                TestEventSagaLegacyWorldIdentityAdoption();
+                TestEventSagaStoryHistory();
                 TestEventSagaTemporaryRosterPruning();
                 return 0;
             }
@@ -324,16 +324,16 @@ namespace JianghuYouling.DevTest
             }
 
             if (args != null && Array.Exists(args,
-                a => string.Equals(a, "--monthly-recovery-only", StringComparison.OrdinalIgnoreCase)))
+                a => string.Equals(a, "--monthly-one-shot-only", StringComparison.OrdinalIgnoreCase)))
             {
-                MonthlyRecoveryTests.Run();
+                MonthlyOneShotTests.Run();
                 return 0;
             }
 
             await TelemetryTests.Run();
             ManualConversationSummaryTests.Run();
             ConversationHistoryPagingTests.Run();
-            MonthlyRecoveryTests.Run();
+            MonthlyOneShotTests.Run();
             TestInfluence();
             TestDeadCleanup();
             TestMemorySourceConsistency();
@@ -350,7 +350,7 @@ namespace JianghuYouling.DevTest
             TestMonthlyCausalCompletionGate();
             TestRecipientSecretSelectionLedger();
             TestBoundedMonthlyLaneCoordination();
-            TestMonthlyDigestAttemptRecoveryPolicy();
+            TestMonthlyRunQueue();
             TestGroupTurnRequestBudget();
             TestStructuredReasoningAndProviderMetadata();
             TestProviderCoreSafety();
@@ -398,7 +398,7 @@ namespace JianghuYouling.DevTest
             TestThinkingPromptRule();
             TestStructuredWorldBook();
             TestConversationSessionIndexStore();
-            TestCompanionMutationJournalReplicaMigration();
+            TestCurrentCommitReplicaPair();
             TestConversationSidebarSourceContracts();
             TestLongTextFocusSourceContracts();
             TestExperiencePresetPolicy();
@@ -410,7 +410,7 @@ namespace JianghuYouling.DevTest
             TestMonthlyTransactionSourceContracts();
             TestOperationAckOutboxStore();
             TestOperationReceiptCommitPolicy();
-            TestEventSagaLegacyWorldIdentityAdoption();
+            TestEventSagaStoryHistory();
             TestEventSagaTemporaryRosterPruning();
             TestMonthlyDigestArchiveMerge();
             TestMonthlyChronicleNoticeState();
@@ -2320,7 +2320,7 @@ namespace JianghuYouling.DevTest
             bool optionalSpeechGateRemoved = optionalSpeechStop != null
                 && optionalSpeechStop.Ok && !optionalSpeechStop.HasToolCalls;
 
-            bool ok = tools.Count == 30 && actionCount >= 3 && categories.Count >= 2
+            bool ok = tools.Count == 29 && actionCount >= 3 && categories.Count >= 2
                 && stopSignalAccepted && modelRounds <= maxModelRounds
                 && prunedReplayOk && leisureOk && retiredUseItemHidden
                 && optionalSpeechGateRemoved;
@@ -6901,27 +6901,15 @@ namespace JianghuYouling.DevTest
                 bindingSaga.WorldId, bindingSaga.TaiwuId, bindingSaga.StartDate,
                 19, "m2-s1", "event_gift", 101, 202, eventArgs);
             string eventDigest = DispatchEnvelopeBinding.CreateDigest(eventEnvelope);
-            var boundEventOutcome = new EventSagaStepOutcome
-            {
-                OperationId = DispatchEnvelopeBinding.CreateOperationId(eventKey, eventDigest),
-                StepId = "m2-s1",
-                ToolName = "event_gift",
-                ArgumentsJson = eventArgs,
-                OperationBindingKey = eventKey,
-                DispatchEnvelopeJson = eventEnvelope,
-                DispatchEnvelopeDigest = eventDigest,
-                ActorId = 101,
-                TargetId = 202,
-                WorldDate = 19,
-            };
-            AssertEq("事件恢复严格重建语义键并绑定信封内工具名",
-                EventDispatchEnvelopeBinding.Matches(
-                    bindingSaga, boundEventOutcome).ToString(), "True");
-            boundEventOutcome.ToolName = "event_spend_night";
-            AssertEq("只篡改事件 ToolName 不能把赠物恢复成春宵",
-                EventDispatchEnvelopeBinding.Matches(
-                    bindingSaga, boundEventOutcome).ToString(), "False");
-            boundEventOutcome.ToolName = "event_gift";
+            string eventOperation = DispatchEnvelopeBinding.CreateOperationId(eventKey, eventDigest);
+            string otherToolKey = EventDispatchEnvelopeBinding.CreateStableKey(
+                bindingSaga.WorldId, bindingSaga.TaiwuId, bindingSaga.StartDate,
+                19, "m2-s1", "event_spend_night", 101, 202, eventArgs);
+            AssertEq("同一事件步骤的工具语义参与操作编号",
+                (eventOperation != DispatchEnvelopeBinding.CreateOperationId(otherToolKey, eventDigest)).ToString(), "True");
+            AssertEq("派发信封参数变化不能沿用操作编号",
+                DispatchEnvelopeBinding.Matches(eventKey, eventEnvelope.Replace("蜂王露", "另一物品"),
+                    eventDigest, eventOperation).ToString(), "False");
 
             var messages = new List<LlmMessage> { LlmMessage.System("稳定前缀") };
             var originalLengths = new Dictionary<string, int>(StringComparer.Ordinal);
@@ -8487,7 +8475,7 @@ namespace JianghuYouling.DevTest
 
         private static void TestCompanionMonthlySafetySource()
         {
-            Console.WriteLine("=== 同道月度计划去重/未知回执恢复源码契约自测 ===");
+            Console.WriteLine("=== 同道月度计划去重/未知回执不重试源码契约自测 ===");
             string relative = System.IO.Path.Combine("src", "JianghuYouling.Frontend", "Game", "CompanionMonthlyActions.cs");
             string path = null;
             foreach (var start in new[] { System.IO.Directory.GetCurrentDirectory(), AppContext.BaseDirectory })
@@ -8532,10 +8520,12 @@ namespace JianghuYouling.DevTest
             AssertEq("可选数量默认值纳入规范化", source.Contains("CanonicalInt(src[\"amount\"], 1, 1, int.MaxValue)").ToString(), "True");
             AssertEq("remember 只能在确认成功后调用", source.Contains("call.Name == \"remember\" && confirmedActionCount <= 0").ToString(), "True");
             AssertEq("remember 后不再允许追加动作", source.Contains("你已经用 remember 收束本月经历").ToString(), "True");
-            AssertEq("remember 返回成功前并入完整批次 checkpoint",
-                source.Contains("UNKNOWN:记忆已写入，但完整批次投影尚未可靠提交").ToString(), "True");
+            AssertEq("remember 成功后不依赖可重播投影 checkpoint",
+                (source.Contains("记住了此事") && !source.Contains("CheckpointCompanionBatchOutcomes")).ToString(), "True");
             AssertEq("RPC 租约自带独立 watchdog", source.Contains("new Timer(_ => ExpireUnknown()").ToString(), "True");
-            AssertEq("未知回执不按失败或成功处理", source.Contains("outcome=unknown no_retry=true quarantine=true").ToString(), "True");
+            AssertEq("未知回执不按失败或成功处理",
+                (source.Contains("_outcomeStatus = \"unknown\";")
+                    && source.Contains("UnknownMutationQuarantine.Add(MutationKey)")).ToString(), "True");
             AssertEq("独立 watchdog 主动终止批次并请求解锁", source.Contains("RequestGuardRelease(BatchEpoch, \"mutation_unknown\")").ToString(), "True");
             AssertEq("未知隔离键使用解析后实体 id", source.Contains("keyArgs[resolvedEntityField] = resolvedEntityId").ToString(), "True");
             AssertEq("未知结果只走代码持有的 receipt 投影",
@@ -8613,7 +8603,7 @@ namespace JianghuYouling.DevTest
                     && source.Contains("EffectHandler.ApplyMonthlyPoison")
                     && source.Contains("EffectHandler.ApplyMonthlyCapture")
                     && source.Contains("ToolDef.Sel(\"所下毒型\", \"烈毒\", \"郁毒\", \"寒毒\", \"赤毒\", \"腐毒\", \"幻毒\")")
-                    && source.Contains("Str(\"poison_type\")")
+                    && source.Contains("S(\"poison_type\")")
                     && source.Contains("&& !state.StrongEnough")
                     && !source.Contains("EvidenceAllowsResolved(evidence")
                     && !source.Contains("snap.InventoryLoaded && !HasPoison(snap)")
@@ -8640,7 +8630,7 @@ namespace JianghuYouling.DevTest
             AssertEq("同道未执行轨迹记录截断脱敏具体原因",
                 (source.Contains("MaxTrajectoryReasonChars = 240")
                     && source.Contains("notExecuted ? SanitizeTrajectoryReason(toolResult)")
-                    && source.Contains("ReadMutationFailureCode(mutationJournalPath, operationId)")
+                    && source.Contains("ReadMutationFailureCode(operationId)")
                     && source.Contains("SecretRedactor.Redact(value).Trim()")
                     && source.Contains("safe[safe.Length - 1] = '…'")
                     && llmLogSource.Contains("observed.Outcome, \"not_executed\"")).ToString(), "True");
@@ -8656,10 +8646,8 @@ namespace JianghuYouling.DevTest
                     && source.Contains("MonthlyAgentRequestBudget.TryAcquire")
                     && !source.Contains("MaxPlannedSteps")
                     && !source.Contains("executionOrdinal >=")).ToString(), "True");
-            AssertEq("同道 journal 接受熔断范围内全部步骤并恢复本地回执",
-                (source.Contains("MaxJournalStepsPerBatch = 64")
-                    && source.Split(new[] { "step < MaxJournalStepsPerBatch" }, StringSplitOptions.None).Length - 1 == 2
-                    && source.Split(new[] { "entry.StepIndex >= MaxJournalStepsPerBatch" }, StringSplitOptions.None).Length - 1 == 2).ToString(), "True");
+            AssertEq("同道不保存旧批次任务或恢复步骤",
+                (!source.Contains("MutationJournal") && !source.Contains("RecoveryDispatchCount")).ToString(), "True");
             AssertEq("完全相同的失败动作不会换 operationId 后盲重试",
                 source.Contains("attemptedKeys.Add(canonicalKey)").ToString(), "True");
             AssertEq("失败重规划只拒绝工具对象参数完全相同的动作",
@@ -8937,9 +8925,9 @@ namespace JianghuYouling.DevTest
                 (source.Contains("TryPreflightCompanionStep(name, a, snap, out preflightFailure)")
                     && source.Contains("背包里没有可换上的装备")
                     && source.Contains("没有装备可卸")).ToString(), "True");
-            AssertEq("换装枚举在首次执行和恢复派发都失败关闭",
-                (source.Split(new[] { "!IsEquipmentPart(part)" }, StringSplitOptions.None).Length - 1 >= 3
-                    && source.Contains("恢复派发换装参数无效")).ToString(), "True");
+            AssertEq("换装枚举在预查和执行时失败关闭",
+                (source.Split(new[] { "!IsEquipmentPart(part)" }, StringSplitOptions.None).Length - 1 == 2
+                    && !source.Contains("RedispatchCompanionEnvelope")).ToString(), "True");
             AssertEq("最新版装备槽覆盖三兵器囊袋佩饰和代步且未知部位不卸兵器",
                 (snapshotSource.Contains("EquipmentSlotHelper.IsItemMeetSlot(slot, key)")
                     && backendSource.Contains("for (sbyte slot = 0; slot < 17; slot++)")
@@ -8971,10 +8959,10 @@ namespace JianghuYouling.DevTest
                 StringComparison.Ordinal);
             AssertEq("Invalid query_person targets are rejected before native skill reads",
                 (invalidPersonGuard >= 0 && recipientSkillRead > invalidPersonGuard).ToString(), "True");
-            AssertEq("Manual non-companion recovery revalidates the actor scene instead of requiring team membership",
-                (source.Contains("JHYL_MANUAL_MONTHLY_RECOVERY")
-                    && source.Contains("EffectHandler.QueryMonthlyAgentEligibility(new List<int> { entry.NpcId }")
-                    && source.Contains("actorArea != sceneArea || actorBlock != sceneBlock")).ToString(), "True");
+            AssertEq("Manual non-companion actions use the current actor scene without a recovery route",
+                (source.Contains("PrepareActorLocalScene(scene, npcId, current")
+                    && source.Contains("scene.ActorScene")
+                    && !source.Contains("RevalidateCompanionRecoveryRoster")).ToString(), "True");
             AssertEq("同道真实 mutation 逐步接受事件人物冲突门约束",
                 (source.Contains("Func<int, IReadOnlyCollection<int>, bool> mutationExecutionGate")
                     && source.Contains("TryReadExternalExecutionGate(mutationExecutionGate")
@@ -9707,89 +9695,25 @@ namespace JianghuYouling.DevTest
                 ledger.TryFreeze(10, 20, 1, out RecipientSecretSelection frozen).ToString(), "True");
             AssertEq("冻结秘闻 ID 不按新序号漂移", frozen.SecretId.ToString(), "101");
 
-            string originalRoot = JYPaths.Root;
-            uint originalWorldId = JYPaths.CurrentWorldId;
-            string sagaRoot = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
-                "jyl_secret_saga_" + Guid.NewGuid().ToString("N").Substring(0, 8));
-            try
+            var frozenArgs = new JObject
             {
-                JYPaths.Root = sagaRoot;
-                JYPaths.CurrentWorldId = 920101;
-                System.IO.Directory.CreateDirectory(JYPaths.Events);
-                var durableArgs = new JObject
-                {
-                    ["a"] = 1,
-                    ["b"] = 2,
-                    ["index"] = 1,
-                    ["secret_id"] = frozen.SecretId,
-                    ["_secret_text"] = frozen.Text,
-                };
-                var durableEnvelope = new JObject(durableArgs)
-                {
-                    ["_actorId"] = 10,
-                    ["_targetId"] = 20,
-                    ["_actorName"] = "甲",
-                    ["_targetName"] = "乙",
-                };
-                const int sagaTaiwu = 9001;
-                string operationId = OperationId.FromStableKey(
-                    "devtest-secret-recovery-envelope");
-                var saga = EventSagaStore.Load(sagaTaiwu);
-                var prepared = new EventSagaStepOutcome
-                {
-                    OperationId = operationId,
-                    StepId = "m1-s1",
-                    ToolName = "event_secret",
-                    Status = "prepared",
-                    Code = "DISPATCH_PENDING",
-                    Intent = "甲欲向乙吐露一桩秘闻",
-                    Summary = "甲欲向乙吐露一桩秘闻",
-                    ArgumentsJson = durableArgs.ToString(Newtonsoft.Json.Formatting.None),
-                    DispatchEnvelopeJson =
-                        durableEnvelope.ToString(Newtonsoft.Json.Formatting.None),
-                    ActorId = 10,
-                    TargetId = 20,
-                    ActorName = "甲",
-                    TargetName = "乙",
-                    WorldDate = 12,
-                    UpdatedUtcTicks = DateTime.UtcNow.Ticks,
-                };
-                saga.OutcomeJournal.Add(prepared);
-                saga.PendingOperationIds.Add(operationId);
-                saga.LastOutcome = prepared;
-                AssertEq("冻结秘闻 prepared 通过生产 Saga journal 持久化",
-                    EventSagaStore.Save(sagaTaiwu, saga).ToString(), "True");
-                EventSaga reloadedSaga = EventSagaStore.Load(sagaTaiwu);
-                EventSagaStepOutcome reloadedPrepared = reloadedSaga.OutcomeJournal
-                    .Single(item => item.OperationId == operationId);
-                var reloadedEnvelope = JObject.Parse(
-                    reloadedPrepared.DispatchEnvelopeJson);
-                var reloadedArgs = JObject.Parse(reloadedPrepared.ArgumentsJson);
-                AssertEq("崩溃恢复信封保留冻结秘闻 ID",
-                    reloadedEnvelope.Value<int>("secret_id").ToString(), "101");
-                AssertEq("崩溃恢复信封保留原接收者",
-                    reloadedEnvelope.Value<int>("_targetId").ToString(), "20");
-                AssertEq("生产恢复派发门接受原接收者与精确冻结秘闻",
-                    RecipientSecretDispatchEnvelope.MatchesFrozenArguments(
-                        reloadedEnvelope, reloadedArgs, reloadedPrepared.ActorId,
-                        reloadedPrepared.TargetId).ToString(), "True");
-                AssertEq("生产恢复派发门拒绝把同一信封改投其他接收者",
-                    RecipientSecretDispatchEnvelope.TryRead(
-                        reloadedEnvelope, 10, 30, out _).ToString(), "False");
-                var driftedEnvelope = new JObject(reloadedEnvelope)
-                {
-                    ["secret_id"] = 202,
-                };
-                AssertEq("生产恢复派发门拒绝序号重排后的其他秘闻 ID",
-                    RecipientSecretDispatchEnvelope.MatchesFrozenArguments(
-                        driftedEnvelope, reloadedArgs, 10, 20).ToString(), "False");
-            }
-            finally
+                ["a"] = 1, ["b"] = 2, ["index"] = 1,
+                ["secret_id"] = frozen.SecretId, ["_secret_text"] = frozen.Text,
+            };
+            var frozenEnvelope = new JObject(frozenArgs)
             {
-                JYPaths.Root = originalRoot;
-                JYPaths.CurrentWorldId = originalWorldId;
-                try { System.IO.Directory.Delete(sagaRoot, true); } catch { }
-            }
+                ["_actorId"] = 10, ["_targetId"] = 20,
+                ["_actorName"] = "甲", ["_targetName"] = "乙",
+            };
+            AssertEq("当次派发使用原接收者与精确冻结秘闻",
+                RecipientSecretDispatchEnvelope.MatchesFrozenArguments(
+                    frozenEnvelope, frozenArgs, 10, 20).ToString(), "True");
+            AssertEq("当次派发拒绝把同一信封改投其他接收者",
+                RecipientSecretDispatchEnvelope.TryRead(frozenEnvelope, 10, 30, out _).ToString(), "False");
+            var driftedEnvelope = new JObject(frozenEnvelope) { ["secret_id"] = 202 };
+            AssertEq("当次派发拒绝序号重排后的其他秘闻 ID",
+                RecipientSecretDispatchEnvelope.MatchesFrozenArguments(
+                    driftedEnvelope, frozenArgs, 10, 20).ToString(), "False");
 
             ledger.Invalidate(10, 20);
             AssertEq("传播尝试后旧接收者候选缓存失效",
@@ -9967,23 +9891,7 @@ namespace JianghuYouling.DevTest
                 NpcNovelPromptBuilder.IsValidCustomPrompt("   ").ToString(), "False");
         }
 
-        private static void TestMonthlyDigestAttemptRecoveryPolicy()
-        {
-            Console.WriteLine("=== 过月摘要重试恢复边界自测 ===");
-            AssertEq("首次 pending 仍允许第一轮网络执行",
-                MonthlyDigestAttemptPolicy.MayRunNetwork(0, 2).ToString(), "True");
-            AssertEq("已消费一轮仍只允许最后一轮网络执行",
-                MonthlyDigestAttemptPolicy.MayRunNetwork(1, 2).ToString(), "True");
-            int recoveredAtLimit =
-                MonthlyDigestAttemptPolicy.NormalizeRecoveredAttempts(2, 2);
-            AssertEq("pending-at-limit 恢复保留已消费次数",
-                recoveredAtLimit.ToString(), "2");
-            AssertEq("pending-at-limit 恢复只提交完成标记不再运行网络",
-                MonthlyDigestAttemptPolicy.MayRunNetwork(recoveredAtLimit, 2).ToString(),
-                "False");
-            AssertEq("损坏的超大恢复计数也不会重新打开网络执行",
-                MonthlyDigestAttemptPolicy.MayRunNetwork(99, 2).ToString(), "False");
-        }
+        private static void TestMonthlyRunQueue() => MonthlyOneShotTests.QueueDoesNotResume();
 
         private static void TestPagedSelectionPolicy()
         {
@@ -11926,7 +11834,7 @@ namespace JianghuYouling.DevTest
             }
         }
 
-        private static void TestCompanionMutationJournalReplicaMigration()
+        private static void TestCurrentCommitReplicaPair()
         {
             Console.WriteLine("=== 同道副作用 journal 当前提交副本迁移自测 ===");
             string root = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
@@ -12294,7 +12202,7 @@ namespace JianghuYouling.DevTest
 
         private static void TestMonthlyTransactionSourceContracts()
         {
-            Console.WriteLine("=== 过月事务投影/恢复/身份/性能源码契约自测 ===");
+            Console.WriteLine("=== 一次性过月、事实投影、身份与性能源码契约自测 ===");
             string Find(string relative)
             {
                 foreach (var start in new[] { System.IO.Directory.GetCurrentDirectory(), AppContext.BaseDirectory })
@@ -12324,6 +12232,14 @@ namespace JianghuYouling.DevTest
                 "JianghuYouling.Core", "ActionSkills", "relationships", "SKILL.md")),
                 System.Text.Encoding.UTF8);
 
+            string groupExchangeJournalSource = System.IO.File.ReadAllText(FindRepoFile(System.IO.Path.Combine(
+                "src", "JianghuYouling.Core", "Memory", "GroupExchangeJournal.cs")), System.Text.Encoding.UTF8);
+            int receiptStart = monthly.IndexOf("static List<StoryProjectionReceipt> BuildSagaStoryReceipts", StringComparison.Ordinal);
+            int mutationMilestone = monthly.IndexOf("signalMutationCheckpoint?.Invoke();", StringComparison.Ordinal);
+            int receiptEnd = monthly.IndexOf("static StoryProjectionReceipt BuildAuthoritativeSagaStoryReceipt", receiptStart, StringComparison.Ordinal);
+            string sagaReceiptSection = monthly.Substring(receiptStart, receiptEnd - receiptStart);
+            string popup = System.IO.File.ReadAllText(FindRepoFile(System.IO.Path.Combine("src",
+                "JianghuYouling.Frontend", "UI", "MonthlyDigestPopup.cs")), System.Text.Encoding.UTF8);
             AssertEq("同道与江湖事件不为展示正文消耗额外模型轮",
                 (!companion.Contains("FinalNarrativeAttempts =")
                     && !companion.Contains("MaxAgentRounds + narrativeAttempt")
@@ -12401,40 +12317,8 @@ namespace JianghuYouling.DevTest
                     && monthly.Contains("IsAutonomousToolEnabled(tool.Name)")
                     && !monthly.Contains("ToolDef.Of(\"event_appearance\"")
                     && !monthly.Contains("EffectHandler.ApplyChangeAppearance")).ToString(), "True");
-
-            int companionPrepare = companion.IndexOf("PrepareCompanionBatchProjection(path, batchId", StringComparison.Ordinal);
-            int companionAppend = companion.IndexOf("TalkOrchestrator.AppendNpcLineIfCurrent", companionPrepare, StringComparison.Ordinal);
-            int companionCommit = companion.IndexOf("CommitCompanionBatchProjection(path, batchId)", companionPrepare, StringComparison.Ordinal);
-            int companionAck = companion.IndexOf("AcknowledgeProjectedCompanionBatch(path, batchId)", companionPrepare, StringComparison.Ordinal);
-            AssertEq("Companion 故障矩阵:完整投影先 durable prepare 再写聊天再 commit 再 ACK",
-                (companionPrepare >= 0 && companionAppend > companionPrepare && companionCommit > companionAppend
-                    && companionAck > companionCommit).ToString(), "True");
-            AssertEq("Companion 工具回调路径不存在提前 ACK", companion.Contains("AcknowledgeTerminal").ToString(), "False");
-            AssertEq("Companion 派发前取消不会 ACK 不存在的后端回执",
-                (companion.Contains("CANCELED_BEFORE_DISPATCH")
-                    && companion.Contains("IsAcknowledgeableMutation(entry)")).ToString(), "True");
-            AssertEq("Companion terminal-but-unprojected 可重启恢复",
-                companion.Contains("RecoverCompanionBatchProjections(path, generation, taiwuId)").ToString(), "True");
-            AssertEq("Companion 传承后只恢复当前太吾且保留旧身份证据",
-                (companion.Contains("entry.WorldId == WorldLifecycle.WorldId && entry.TaiwuId == taiwuId")
-                    && companion.Contains("entry.WorldId != WorldLifecycle.WorldId")
-                    && companion.Contains("request.WorldId, request.TaiwuId, request.OperationId, ok =>")).ToString(), "True");
-            AssertEq("Companion 同世界同角色同日期批次只运行一次 Agent loop",
-                (companion.Contains("TryLoadProjectedCompanionBatch")
-                    && companion.Contains("OperationId.FromStableKey(\"companion-batch|")
-                    && !companion.Contains("|clear=\" + conversationClearEpoch")).ToString(), "True");
             AssertEq("Companion unknown 批次保留前序成功并提交故事",
                 companion.Contains("FinalizeCompanionBatchProjection(taiwuId, npcId, date, result, batchId").ToString(), "True");
-            AssertEq("Companion 未知收敛终态时丢弃旧未知步骤文案",
-                (companion.Contains("batchEntry.ProjectionOutcomesJson = null;")
-                    && companion.Contains("string.Equals(batchEntry.BatchId, found.BatchId")
-                    && companion.Contains("found.OutcomeText = null;")).ToString(), "True");
-            AssertEq("Companion operation_not_found 有界为一次",
-                (companion.Contains("found.RecoveryDispatchCount != 0")
-                    && companion.Contains("found.RecoveryDispatchCount = 1")
-                    && companion.Contains("CheckpointCompanionRecoveryDispatch")).ToString(), "True");
-            AssertEq("Companion journal 拒绝重复 operationId",
-                companion.Contains("!operationIds.Add(entry.OperationId)").ToString(), "True");
             AssertEq("Companion 未执行预查不消费去重键，状态变化后允许重试",
                 (companion.Contains("if (attemptedKeys.Contains(canonicalKey))")
                     && companion.Contains("if (!notExecuted && !readOnlyQuery) attemptedKeys.Add(canonicalKey);")
@@ -12452,40 +12336,17 @@ namespace JianghuYouling.DevTest
                     && companion.Contains("normalized == \"enmity\"")
                     && companion.Contains("if (make && state.Enemy)")
                     && companion.Contains("if (!make && !state.Enemy)")).ToString(), "True");
-            AssertEq("Companion journal 仅按 tmp+bak 一致双副本修复 main（有效 main 永远优先）",
-                (companion.Contains("JHYL_COMPANION_JOURNAL_REPAIR_MAIN")
-                  && companion.Contains("SaveMutationJournalDocument(path, best)")
-                  && companion.Contains("CurrentCommitReplicaPair.TryPublish(path + \".tmp\"")
-                  && companion.Contains("SameMutationJournal(main, currentTmp)")
-                  && companion.Contains("SameMutationJournal(main, currentBak)")).ToString(), "True");
-            AssertEq("Companion main+tmp 提交后 bak 故障仍继续原派发而不留下延迟恢复动作",
-                (companion.Contains("JHYL_COMPANION_JOURNAL_MAIN_TMP_COMMIT_POINT")
-                  && companion.Contains("main+tmp 已提交，本次继续原派发")
-                  && companion.Contains("return true; // JHYL_COMPANION_JOURNAL_MAIN_TMP_COMMIT_POINT"))
-                    .ToString(), "True");
-            string groupExchangeJournalSource = System.IO.File.ReadAllText(FindRepoFile(System.IO.Path.Combine(
-                "src", "JianghuYouling.Core", "Memory", "GroupExchangeJournal.cs")),
-                System.Text.Encoding.UTF8);
             AssertEq("群聊事务 main+tmp 提交后 bak 故障仍继续原派发而不留下延迟恢复动作",
                 groupExchangeJournalSource.Contains("JHYL_GROUP_JOURNAL_MAIN_TMP_COMMIT_POINT")
                     .ToString(), "True");
-            AssertEq("Companion journal 在序列化前执行字段与集合上限校验",
-                (companion.Contains("MutationJournalDocumentFits(doc)")
-                    && companion.Contains("ProjectionOutcomesShapeValid")
-                    && companion.Contains("ProjectionReceiptsShapeValid")).ToString(), "True");
-            AssertEq("Companion typed receipts 随 batch journal 耐久保存并可恢复",
-                (companion.Contains("ProjectionReceiptsJson")
-                    && companion.Contains("result.StoryReceipts.AddRange(receipts)")
-                    && companion.Contains("BuildNonFactualFallback(r.Outcomes)")).ToString(), "True");
-            AssertEq("Companion typed receipts 使用独立现场名册而非自证 allowlist",
-                (companion.Contains("ProjectionParticipantIdsJson")
+            AssertEq("Companion typed receipts 由独立现场名册授权",
+                (companion.Contains("PopulateAuthorizedParticipants(result.AuthorizedParticipantIds")
                     && companion.Contains("r.AuthorizedParticipantIds")
-                    && companion.Contains("TryCollectBatchProjectionAuthority")
                     && !companion.Contains("if (receipt.ActorId > 0) allowedIds.Add(receipt.ActorId)")).ToString(), "True");
-            AssertEq("Companion 成功事实强制 operationId 绑定的持久 backend receipt",
+            AssertEq("Companion 成功事实仍强制绑定当前后端回执",
                 (companion.Contains("HasAuthoritativeSucceededReceipt")
-                    && companion.Contains("AUTHORITATIVE_RECEIPT_MISSING_OR_MISMATCHED")
-                    && companion.Contains("CompanionProjectionReceiptsMatchJournal")).ToString(), "True");
+                    && companion.Contains("outcome.OperationId != OperationId")
+                    && companion.Contains("outcome.IsSucceeded && string.IsNullOrWhiteSpace(outcome.Receipt)")).ToString(), "True");
             AssertEq("Companion 危险动机线索按角色 ID 记录但不再作为硬授权",
                 (companion.Contains("string.Join(\"|\", targets.ConvertAll")
                     && companion.Contains("BuildEvidenceContext(snap, date, scene)")
@@ -12497,33 +12358,17 @@ namespace JianghuYouling.DevTest
                     && companion.Contains("!char.IsDigit(text[end])")).ToString(), "True");
             AssertEq("Companion 敌对证据排除化解旧怨回执",
                 companion.Contains("outcome.Status == \"succeeded\" && SagaOutcomeCreatesHostility(outcome)").ToString(), "True");
-
-            int sagaReconcile = monthly.IndexOf("ReconcileSagaPendingOperations(taiwuId, saga", StringComparison.Ordinal);
-            int sagaFirstClear = monthly.IndexOf("EventSagaStore.Clear(taiwuId)", StringComparison.Ordinal);
-            AssertEq("Saga 在任何 Clear 之前先对账", (sagaReconcile >= 0 && sagaFirstClear > sagaReconcile).ToString(), "True");
-            AssertEq("新连载继承已加载旧连载修订号而非从零覆盖",
-                monthly.Contains("Revision = saga == null ? 0 : saga.Revision").ToString(), "True");
-            AssertEq("Saga operation_not_found 保存信封且仅恢复派发一次",
-                (monthly.Contains("DispatchEnvelopeJson = dispatchEnvelope")
-                    && monthly.Contains("journal.RecoveryDispatchCount == 0")
-                    && monthly.Contains("journal.RecoveryDispatchCount = 1")).ToString(), "True");
             AssertEq("Saga terminal unknown 保持未知叙事",
                 monthly.Contains("return \"未知:\" + intent + \"的最终结果无法判定").ToString(), "True");
-            int sagaReceiptBuilder = monthly.IndexOf("static List<StoryProjectionReceipt> BuildSagaStoryReceipts", StringComparison.Ordinal);
-            int sagaReceiptEnd = monthly.IndexOf("static StoryProjectionReceipt BuildAuthoritativeSagaStoryReceipt", sagaReceiptBuilder, StringComparison.Ordinal);
-            string sagaReceiptSection = sagaReceiptBuilder >= 0 && sagaReceiptEnd > sagaReceiptBuilder
-                ? monthly.Substring(sagaReceiptBuilder, sagaReceiptEnd - sagaReceiptBuilder) : "";
             AssertEq("Saga durable story 只读 executor-owned StoryReceipt，不从 dispatch envelope 取人物或资产",
                 (sagaReceiptSection.Contains("item.StoryReceipt")
                     && sagaReceiptSection.Contains("SagaStoryReceiptMatchesJournal")
                     && !sagaReceiptSection.Contains("DispatchEnvelopeJson")
-                    && sagaStore.Contains("ReceiptMatchesAuthoritativeOutcome")).ToString(), "True");
+                    && monthly.Contains("ReceiptMatchesAuthoritativeOutcome")).ToString(), "True");
             AssertEq("Saga legacy OK callback 缺 backend receipt 时保持 unknown",
                 (monthly.Contains("|| callbackSucceeded;")
                     && monthly.Contains("journal.StoryReceipt = hasBackendReceipt")
                     && sagaStore.Contains("public StoryProjectionReceipt StoryReceipt")).ToString(), "True");
-            AssertEq("Saga 旧格式终态投影恢复保留全部章节",
-                monthly.Contains("string.Join(\"\\n\\n\", saga.Chapters.ToArray())").ToString(), "True");
             AssertEq("连载首回按太吾所在地建档且后续地点固定",
                 (monthly.Contains("eventArea = twArea >= 0 ? twArea : valid[0]")
                  && monthly.Contains("连载仍固定发生于首回地点")
@@ -12591,7 +12436,6 @@ namespace JianghuYouling.DevTest
                     && monthly.Contains("EffectHandler.ApplyMonthlyKillDetailed")
                     && monthly.Contains("lootName[0] = lootValue;")
                     && monthly.Contains("Project(loot)")).ToString(), "True");
-            int mutationMilestone = monthly.IndexOf("JHYL_MONTHLY_MUTATION_CHECKPOINT", StringComparison.Ordinal);
             AssertEq("事件 mutation checkpoint 在完整 Agent 工具链终态后开放",
                 (mutationMilestone >= 0 && monthly.Contains("signalMutationCheckpoint?.Invoke();")).ToString(), "True");
             AssertEq("江湖事件停止工具后只收束行动，正文留待按需后台生成",
@@ -12603,7 +12447,7 @@ namespace JianghuYouling.DevTest
                     && monthly.Contains("eventText = BuildFallbackStory(areaName, date, landed")
                     && monthly.Contains("事实投影已完成")).ToString(), "True");
             AssertEq("过月事实结果自动写记忆且按需正文不参与 Agent",
-                (monthly.Contains("Content = BuildEventOutcomeMemory(saga, checkpoint, recipientId)")
+                (monthly.Contains("Content = BuildEventOutcomeMemory(saga, delivery, recipientId)")
                     && monthly.Contains("SourceKind = \"monthly_event_fanout\"")
                     && companion.Contains("CommitCompanionActorOutcomeMemory")
                     && companion.Contains("SourceKind = \"companion_monthly_outcomes\"")
@@ -12618,15 +12462,14 @@ namespace JianghuYouling.DevTest
                 (monthly.Contains("EnsureGuaranteedMonthlyEvent(taiwuId, date)")
                  && monthly.Contains("monthly-guaranteed:")
                  && monthly.Contains("JHYL_MONTHLY_GUARANTEED_STORY")).ToString(), "True");
-            AssertEq("江湖事件风闻投影中断时优先恢复已耐久的真实故事而不制造同月兜底副本",
+            AssertEq("江湖事件本次收尾优先展示已归档事实而不制造同月兜底副本",
                 (monthly.Contains("JHYL_MONTHLY_GUARANTEED_REUSED_REAL")
                  && monthly.Contains("EventLogStore.Load(taiwuId)")
                  && monthly.Contains("existing.Date != date")).ToString(), "True");
-            AssertEq("过月同道按本体年龄组排除婴儿并覆盖恢复重派",
+            AssertEq("过月同道按本体年龄组排除婴儿",
                 (companion.Contains("JHYL_COMPANION_MONTHLY_NO_BABIES")
                     && companion.Contains("QueryNonBabyCompanionGroup(taiwuId")
                     && companion.Contains("snap.GameAgeGroup == GameData.Domains.Character.AgeGroup.Baby")
-                    && companion.Contains("QueryNonBabyCompanionGroup(entry.TaiwuId")
                     && backend.Contains("!IsEligibleMonthlyAgentCharacter(cid, companion)")
                     && backend.Contains("!IsAnimalCharacter(character)")
                     && backend.Contains("|| TryGetCharacterProxySource(characterId, out _)")).ToString(), "True");
@@ -12640,8 +12483,8 @@ namespace JianghuYouling.DevTest
                     && companion.Contains("queryResultCache.TryGetValue(canonicalKey")
                     && companion.Contains("readOnlyQuery && ToolResultSucceeded(toolResult)")
                     && companion.Contains("InvalidateCompanionQueryState(call.Name")).ToString(), "True");
-            AssertEq("正文与记忆解耦且自动记忆使用稳定来源可幂等恢复",
-                (monthly.Contains("BuildEventOutcomeMemory(saga, checkpoint, recipientId)")
+            AssertEq("正文与记忆解耦且自动记忆使用稳定来源防重",
+                (monthly.Contains("BuildEventOutcomeMemory(saga, delivery, recipientId)")
                     && !monthly.Contains("Content = \"我听闻：\" + checkpoint.StoryText")
                     && companion.Contains("batchId + \":actor:\" + npcId")
                     && companion.Contains("HasCompanionOutcomeMemorySource")
@@ -12657,8 +12500,8 @@ namespace JianghuYouling.DevTest
                 (monthly.Contains("TaiwuFameEvidenceIds != null && saga.TaiwuFameEvidenceIds.Count > 0")
                     && monthly.Contains("saga.TaiwuFameEvidenceIds == null || saga.TaiwuFameEvidenceIds.Count == 0")
                     && sagaStore.Contains("public List<string> TaiwuFameEvidenceIds")
-                    && sagaStore.Contains("outcome.ActorId == expectedTaiwuId")
-                    && sagaStore.Contains("ValidFameEnvelope(outcome)")).ToString(), "True");
+                    && monthly.Contains("int actorId = fameTool ? taiwuId")
+                    && monthly.Contains("saga.TaiwuFameEvidenceIds.Contains(evidenceId)")).ToString(), "True");
             AssertEq("江湖事件同轮允许多项只读查询但只落地一项状态变更",
                 (monthly.Contains("bool mutationDecisionConsumedThisRound = false")
                     && monthly.Contains("bool queryOnlyRound = false")
@@ -12674,9 +12517,9 @@ namespace JianghuYouling.DevTest
                     && settlement.Contains("laneCoordinator.MarkMutationIsolationUnresolved")
                     && companion.Contains("snap.NpcId, currentActionTargetIds, out externalGateOpen")
                     && !settlement.Contains("}, () => evDone,")).ToString(), "True");
-            AssertEq("事件 UI 完成不再释放同道冲突门且 pending journal 保留身份隔离",
+            AssertEq("事件 UI 完成不再释放同道冲突门且 当前未确认动作保留身份隔离",
                 (!settlement.Contains("laneCoordinator.MarkEventDone")
-                    && monthly.Contains("JHYL_MONTHLY_MUTATION_ISOLATION_RETAINED")
+                    && monthly.Contains("runSaga.UnconfirmedOperationIds.Count > 0")
                     && monthly.Contains("TryCollectPendingMutationParticipants")
                     && monthly.Contains("if (taiwuId > 0) eventParticipantIds.Add(taiwuId);")
                     && monthly.Contains("onMutationIsolationUnresolved?.Invoke")
@@ -12697,64 +12540,6 @@ namespace JianghuYouling.DevTest
                     && !companion.Contains("startFollowers?.Invoke()")
                     && !companion.Contains("allowFullAgentFanout")
                     && !settlement.Contains("delegate { return runEvent && evDone; }")).ToString(), "True");
-            int digestPending = settlement.IndexOf("SaveDigestState(true, work.Date, work.Attempts)", StringComparison.Ordinal);
-            int digestStart = settlement.IndexOf("StartCoroutine(RunDigestWithRetry", digestPending, StringComparison.Ordinal);
-            int digestComplete = settlement.IndexOf(
-                "SaveDigestStateAtPath(capturedDigestStatePath, false, date, attempts)",
-                digestStart, StringComparison.Ordinal);
-            int digestConsume = settlement.IndexOf("_lastProcessedDate = Math.Max(_lastProcessedDate, date)", digestComplete, StringComparison.Ordinal);
-            AssertEq("月度摘要持久化 pending 后执行，完整提交后才消费月份",
-                (digestPending >= 0 && digestStart > digestPending && digestComplete > digestStart
-                    && digestConsume > digestComplete).ToString(), "True");
-            AssertEq("月度摘要网络空结果有限重试并可在重启后恢复",
-                (settlement.Contains("DigestRetryLimit = 2")
-                    && settlement.Contains("RunDigestWithRetry(work.TaiwuId, work.Date, work.Attempts)")
-                    && settlement.Contains("ResumePendingDigest(bgd.TaiwuCharId, state.Date, state.Attempts)")
-                    && settlement.Contains("JHYL_MONTHLY_DIGEST_RETRY")
-                    && settlement.Contains("MonthlyAgentRequestBudget.IsExhausted")
-                    && settlement.Contains("MonthlyDigestAttemptPolicy.NormalizeRecoveredAttempts")
-                    && settlement.Contains("MonthlyDigestAttemptPolicy.MayRunNetwork")
-                    && !settlement.Contains("Math.Min(DigestRetryLimit - 1, priorAttempts)")
-                    && settlement.IndexOf("capturedDigestStatePath, true, date, attempts",
-                        settlement.IndexOf("attempts++;", StringComparison.Ordinal),
-                        StringComparison.Ordinal)
-                        < settlement.IndexOf("if (!finished || producedResult) break",
-                            StringComparison.Ordinal)
-                    && settlement.Contains("network_retry_suppressed=true")).ToString(), "True");
-            AssertEq("不同月份摘要由单一 durable checkpoint 串行处理",
-                (settlement.Contains("private static readonly List<DigestWork> DigestQueue")
-                    && settlement.Contains("if (_processingDate >= 0 || DigestQueue.Count == 0")
-                    && settlement.Contains("DigestQueue.Sort((left, right) => left.Date.CompareTo(right.Date))")
-                    && settlement.Contains("newer_months_blocked=")).ToString(), "True");
-            AssertEq("前一月份 completion durable 后才启动队列下一月",
-                (digestComplete > digestStart
-                    && settlement.IndexOf("TryStartNextDigest();", digestComplete, StringComparison.Ordinal) > digestComplete).ToString(), "True");
-            AssertEq("completion checkpoint 短暂写失败会在本次游戏继续退避重试",
-                (settlement.Contains("while (!completionSaved && DigestWorldIsCurrent(generation, worldId))")
-                    && settlement.Contains("JHYL_MONTHLY_DIGEST_COMPLETION_RETRY")).ToString(), "True");
-            AssertEq("月度摘要跨世界返回后不消费旧尝试也不重解析到新世界路径",
-                (settlement.Contains("string capturedDigestStatePath = DigestStatePath();")
-                    && settlement.Contains("if (!DigestWorldIsCurrent(generation, worldId)) yield break;")
-                    && settlement.Contains("SaveDigestStateAtPath(")
-                    && settlement.Contains("capturedDigestStatePath, true, date, attempts")
-                    && settlement.Contains("capturedDigestStatePath, false, date, attempts")
-                    && settlement.Contains("WorldLifecycle.WorldId == worldId"))
-                    .ToString(), "True");
-            int monthDateGuard = settlement.IndexOf("if (date <= _lastProcessedDate) return;", StringComparison.Ordinal);
-            int monthScheduledGuard = monthDateGuard >= 0
-                ? settlement.IndexOf("if (DigestScheduled(date))", monthDateGuard, StringComparison.Ordinal) : -1;
-            int monthQueuedRetry = monthScheduledGuard >= 0
-                ? settlement.IndexOf("TryStartNextDigest();", monthScheduledGuard, StringComparison.Ordinal) : -1;
-            int monthHostGuard = monthQueuedRetry >= 0
-                ? settlement.IndexOf("if (DigestHost() == null)", monthQueuedRetry, StringComparison.Ordinal) : -1;
-            int monthTriggerMethod = monthHostGuard >= 0
-                ? settlement.IndexOf("private static void TriggerMonthlyDigest", monthHostGuard, StringComparison.Ordinal) : -1;
-            AssertEq("pending checkpoint 写失败后同月通知会重试队首而非被去重吞掉",
-                (monthDateGuard >= 0 && monthScheduledGuard > monthDateGuard
-                    && monthQueuedRetry > monthScheduledGuard && monthHostGuard > monthQueuedRetry
-                    && monthTriggerMethod > monthHostGuard).ToString(), "True");
-            string popup = System.IO.File.ReadAllText(FindRepoFile(System.IO.Path.Combine("src",
-                "JianghuYouling.Frontend", "UI", "MonthlyDigestPopup.cs")), System.Text.Encoding.UTF8);
             AssertEq("原生月报阻挡期间逐月保留弹窗进度而非覆盖单槽",
                 (popup.Contains("static readonly List<PendingProgress> PendingQueue")
                     && popup.Contains("PendingQueue[i] = value;")
@@ -12765,41 +12550,26 @@ namespace JianghuYouling.DevTest
                     && monthly.Contains("RosterMetricsDeadlineSeconds = 8f")
                     && monthly.Contains("metric.CompletionState = 2")
                     && monthly.Split(new[] { "roster.Sort(" }, StringSplitOptions.None).Length - 1 == 1).ToString(), "True");
-
-            int fanoutStart = monthly.IndexOf("static IEnumerator CommitPreparedEventFanout", StringComparison.Ordinal);
-            int fanoutEventLog = monthly.IndexOf("EventLogStore.EnsureFanoutEntry", fanoutStart, StringComparison.Ordinal);
-            int fanoutMemory = monthly.IndexOf("EventFanoutMemoryWriter.TryCommit", fanoutEventLog, StringComparison.Ordinal);
-            int fanoutRecipientCheckpoint = monthly.IndexOf("EventFanoutPolicy.MarkRecipientCommitted", fanoutMemory, StringComparison.Ordinal);
-            int fanoutHeard = monthly.IndexOf("EventLogStore.TryUpdateHeard", fanoutRecipientCheckpoint, StringComparison.Ordinal);
-            int projectionCommit = monthly.IndexOf("checkpoint.ProjectionCommitted = true", fanoutHeard, StringComparison.Ordinal);
-            int fanoutAck = monthly.IndexOf("AcknowledgeProjectedSagaOutcomes(saga);", projectionCommit, StringComparison.Ordinal);
-            AssertEq("月事件严格 EventLog→逐收件人记忆→progress→Heard→projection→ACK",
-                (fanoutStart >= 0 && fanoutEventLog > fanoutStart && fanoutMemory > fanoutEventLog
-                    && fanoutRecipientCheckpoint > fanoutMemory && fanoutHeard > fanoutRecipientCheckpoint
-                    && projectionCommit > fanoutHeard && fanoutAck > projectionCommit).ToString(), "True");
             AssertEq("月事件风闻使用 EventId+recipient 稳定来源并删除旧随机死代码",
                 (monthly.Contains("SourceKind = \"monthly_event_fanout\"")
-                    && monthly.Contains("string sourceId = checkpoint.EventId + \":\" + recipientId")
+                    && monthly.Contains("SourceId = delivery.EventId + \":\" + recipientId")
                     && monthly.Contains("EventFanoutPolicy.SelectRecipient(eventId")
                     && !monthly.Contains("NotifyAndLogEvent")).ToString(), "True");
-
-            AssertEq("Saga store staged bytes 穿透 OS cache", sagaStore.Contains("stream.Flush(true);").ToString(), "True");
-            AssertEq("Saga store 严格 staged/main/bak 同版读回",
-                (sagaStore.Contains("tmp 严格读回不一致")
-                    && sagaStore.Contains("main/tmp 提交读回不一致")
-                    && sagaStore.Contains("bak 提交读回不一致")).ToString(), "True");
-            AssertEq("Saga store 拒绝重复 JSON 属性",
-                sagaStore.Contains("DuplicatePropertyNameHandling.Error").ToString(), "True");
-            AssertEq("Saga Clear 对 pending/unknown/未投影证据 fail-closed",
-                (sagaStore.Contains("HasUnsettledEvidence(best)")
-                    && sagaStore.Contains("拒绝 Clear")).ToString(), "True");
-            AssertEq("Saga 从权威 journal 修复缺失 pending 索引",
-                (sagaStore.Contains("bool unresolved = status == \"prepared\"")
-                    && sagaStore.Contains("saga.PendingOperationIds.Add(outcome.OperationId)")).ToString(), "True");
-            AssertEq("Saga store 写前校验 8MiB/字段/LastOutcome 上限",
-                (sagaStore.Contains("MaxSagaBytes = 8 * 1024 * 1024")
-                    && sagaStore.Contains("ValidOutcomeShape(saga.LastOutcome")
-                    && sagaStore.Contains("if (!ValidSagaShape(saga))")).ToString(), "True");
+            AssertEq("过月只查询清理回执，不重开旧任务",
+                (!companion.Contains("MutationJournal")
+                    && !monthly.Contains("ReconcileSagaPendingOperations")
+                    && !settlement.Contains("RunDigestWithRetry")
+                    && settlement.Contains("DigestQueue.Claim(taiwuId, date)")).ToString(), "True");
+            AssertEq("连载写入复用原子存储且不保存恢复队列",
+                (sagaStore.Contains("DurableFileStore.TryWriteTextAtomic")
+                    && sagaStore.Contains("MaxSagaBytes = 8 * 1024 * 1024")
+                    && !sagaStore.Contains("FanoutJournal")
+                    && !sagaStore.Contains("DispatchEnvelopeJson")).ToString(), "True");
+            AssertEq("记录失败只警告，不改判后端执行结果",
+                (monthly.Contains("SaveStoryHistory(saga);")
+                    && monthly.Contains("saga.RecordsIncomplete = true")
+                    && companion.Contains("记录未完整保存")
+                    && !companion.Contains("LOCAL_JOURNAL_PERSIST_FAILED")).ToString(), "True");
         }
 
         private static async Task TestMemoryIndexAndCompaction(OpenAiCompatibleClient client)
@@ -14898,132 +14668,7 @@ namespace JianghuYouling.DevTest
             }
         }
 
-        private static void TestEventSagaLegacyWorldIdentityAdoption()
-        {
-            Console.WriteLine("=== 连载事件旧档世界身份收养 / fail-closed 自测 ===");
-            string originalRoot = JYPaths.Root;
-            uint originalWorldId = JYPaths.CurrentWorldId;
-            string dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
-                "jyl_saga_world_" + Guid.NewGuid().ToString("N").Substring(0, 8));
-            try
-            {
-                JYPaths.Root = dir;
-                JYPaths.CurrentWorldId = 780630018;
-                System.IO.Directory.CreateDirectory(JYPaths.Events);
-
-                JObject LegacySagaJson(int taiwuId) => new JObject
-                {
-                    ["Version"] = 6,
-                    ["Revision"] = 3,
-                    ["TaiwuId"] = taiwuId,
-                    ["Active"] = true,
-                    ["Title"] = "「潭州」风云",
-                    ["Outline"] = "本地江湖人被卷入同一桩连环风波",
-                    ["AreaName"] = "潭州",
-                    ["AreaId"] = 23,
-                    ["ProtagonistIds"] = new JArray(3103, 3106),
-                    ["ProtagonistNames"] = new JArray("甲", "乙"),
-                    ["Chapters"] = new JArray(),
-                    ["TaiwuInvolved"] = false,
-                    ["MonthsTotal"] = 5,
-                    ["MonthsElapsed"] = 1,
-                    ["StartDate"] = 65,
-                    ["CompletedDate"] = 0,
-                    ["OpenLoops"] = new JArray(),
-                    ["Constraints"] = new JArray(),
-                    ["OutcomeJournal"] = new JArray(),
-                    ["PendingOperationIds"] = new JArray(),
-                    ["FanoutJournal"] = new JArray(),
-                };
-                void WriteSaga(int taiwuId, JObject json) => System.IO.File.WriteAllText(
-                    System.IO.Path.Combine(JYPaths.Events, "saga_" + taiwuId + ".json"),
-                    json.ToString(Newtonsoft.Json.Formatting.Indented),
-                    new System.Text.UTF8Encoding(false));
-
-                // 1) 旧档(无 WorldId 字段)在世界目录内加载 → 收养该目录的世界身份。
-                WriteSaga(6832, LegacySagaJson(6832));
-                var adopted = EventSagaStore.Load(6832);
-                AssertEq("旧档加载可靠", adopted.LoadReliable.ToString(), "True");
-                AssertEq("旧档收养目录世界身份", adopted.WorldId.ToString(), "780630018");
-                AssertEq("旧档连载内容原样保留", (adopted.Active && adopted.MonthsElapsed == 1
-                    && adopted.MonthsTotal == 5 && adopted.AreaId == 23).ToString(), "True");
-
-                // 2) Save 后收养的身份必须 durable 持久化。
-                AssertEq("收养后的连载可存盘", EventSagaStore.Save(6832, adopted).ToString(), "True");
-                string persisted = System.IO.File.ReadAllText(
-                    System.IO.Path.Combine(JYPaths.Events, "saga_6832.json"));
-                AssertEq("世界身份已 durable 落盘",
-                    persisted.Contains("\"WorldId\": 780630018").ToString(), "True");
-                AssertEq("重载后读到持久化的世界身份", EventSagaStore.Load(6832).WorldId.ToString(), "780630018");
-
-                // 3) 非零 WorldId 绝不改写：真正属于另一世界的证据保持 fail-closed。
-                var foreignJson = LegacySagaJson(7000);
-                foreignJson["WorldId"] = 999;
-                WriteSaga(7000, foreignJson);
-                AssertEq("异世界连载身份不被改写", EventSagaStore.Load(7000).WorldId.ToString(), "999");
-
-                // 4) main 已提交但 bak 刷新失败时 tmp 是唯一当前副本；main 后续损坏
-                // 不得回滚/清空成可靠状态，必须保留恢复证据并 fail-closed。
-                const int degradedTaiwu = 7100;
-                string degradedPath = System.IO.Path.Combine(
-                    JYPaths.Events, "saga_" + degradedTaiwu + ".json");
-                var degraded = EventSagaStore.Load(degradedTaiwu);
-                degraded.Active = true;
-                degraded.Title = "降级提交证据";
-                degraded.Outline = "验证主副本提交后的故障恢复";
-                degraded.AreaName = "太吾村";
-                degraded.AreaId = 1;
-                degraded.MonthsTotal = 3;
-                degraded.MonthsElapsed = 0;
-                degraded.StartDate = 1;
-                degraded.ProtagonistIds.Add(7201);
-                degraded.ProtagonistNames.Add("故障恢复测试人物");
-                System.IO.Directory.CreateDirectory(degradedPath + ".bak");
-                AssertEq("连载 main 精确提交后 bak 失败仍报告成功",
-                    EventSagaStore.Save(degradedTaiwu, degraded).ToString(), "True");
-                AssertEq("连载降级提交保留精确当前 tmp",
-                    System.IO.File.Exists(degradedPath + ".tmp").ToString(), "True");
-                System.IO.File.WriteAllText(degradedPath, "{broken-current",
-                    new System.Text.UTF8Encoding(false));
-                var degradedReload = EventSagaStore.Load(degradedTaiwu);
-                AssertEq("连载 main 损坏且仅余当前 tmp 时保持 fail-closed",
-                    degradedReload.LoadReliable.ToString(), "False");
-                AssertEq("连载 fail-closed 不删除当前 tmp 证据",
-                    System.IO.File.Exists(degradedPath + ".tmp").ToString(), "True");
-
-                // 5) 回档边界与普通 Clear 不同：本体存档已经回退，无法证明提交的外部
-                // saga 只属于旧时间线，必须删掉全部候选，不能永久挡住同月重新生成。
-                const int rollbackTaiwu = 7101;
-                string rollbackPath = System.IO.Path.Combine(
-                    JYPaths.Events, "saga_" + rollbackTaiwu + ".json");
-                System.IO.File.WriteAllText(rollbackPath, "{broken-current",
-                    new System.Text.UTF8Encoding(false));
-                System.IO.File.WriteAllText(rollbackPath + ".tmp",
-                    LegacySagaJson(rollbackTaiwu).ToString(Newtonsoft.Json.Formatting.Indented),
-                    new System.Text.UTF8Encoding(false));
-                AssertEq("回档前不可靠连载候选会被识别",
-                    EventSagaStore.Load(rollbackTaiwu).LoadReliable.ToString(), "False");
-                AssertEq("回档可丢弃无法证明的旧时间线连载候选",
-                    EventSagaStore.DiscardUnreliableForSaveRollback(rollbackTaiwu).ToString(), "True");
-                AssertEq("回档清理后同月可从可靠空连载重新生成",
-                    EventSagaStore.Load(rollbackTaiwu).LoadReliable.ToString(), "True");
-                AssertEq("回档清理删除 saga 的 main/tmp/bak 全部候选",
-                    (!System.IO.File.Exists(rollbackPath)
-                        && !System.IO.File.Exists(rollbackPath + ".tmp")
-                        && !System.IO.File.Exists(rollbackPath + ".bak")).ToString(), "True");
-
-                // 6) 世界身份未就绪(=0)时不猜测：旧档保持无主，等待权威身份。
-                JYPaths.CurrentWorldId = 0;
-                WriteSaga(8000, LegacySagaJson(8000));
-                AssertEq("身份未就绪时不收养", EventSagaStore.Load(8000).WorldId.ToString(), "0");
-            }
-            finally
-            {
-                JYPaths.Root = originalRoot;
-                JYPaths.CurrentWorldId = originalWorldId;
-                try { System.IO.Directory.Delete(dir, true); } catch { }
-            }
-        }
+        private static void TestEventSagaStoryHistory() => MonthlyOneShotTests.RunStoryHistory();
 
         private static void TestMonthlyChronicleNoticeState()
         {
