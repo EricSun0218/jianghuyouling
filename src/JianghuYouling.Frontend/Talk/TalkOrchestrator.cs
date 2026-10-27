@@ -8309,10 +8309,10 @@ namespace JianghuYouling
                         int amt = Math.Max(1, I("amount", 1));
                         int[] tg = { int.MinValue };
                         EffectHandler.ApplyTaiwuGiveItem(taiwu, npc, pick.Key, amt, actual =>
-                            { tg[0] = actual; Emit(actual > 0 ? ("收下太吾相赠:" + pick.Name + (actual > 1 ? " ×" + actual : "")) : ("太吾欲赠「" + pick.Name + "」却未能到手"), null, null, actual > 0); }, stableOperationId);
+                            { tg[0] = actual; Emit(actual > 0 ? ("收下太吾相赠:" + DescribeGiftedItem(pick) + (actual > 1 ? " ×" + actual : "")) : ("太吾欲赠「" + pick.Name + "」却未能到手"), null, null, actual > 0); }, stableOperationId);
                         float tgdl = Time.unscaledTime + RpcReceiptWaitSeconds;
                         while (tg[0] == int.MinValue && Time.unscaledTime < tgdl) yield return null;
-                        if (tg[0] > 0) onResult("(你已收下太吾的" + pick.Name + ",可在回话里道谢收尾。)");
+                        if (tg[0] > 0) onResult("(你已收下太吾的" + DescribeGiftedItem(pick) + ",可在回话里道谢收尾。)");
                         else if (tg[0] == int.MinValue) onResult(ActMsg(-1, null, null));
                         else onResult("(没能收下太吾的「" + pick.Name + "」——他此刻或已无此物、或你背包已满。别假称已收下。)");
                         yield break;
@@ -8633,6 +8633,68 @@ namespace JianghuYouling
             if (q.Contains("材料") || q.Contains("木料") || q.Contains("金石") || q.Contains("玉石") || q.Contains("布料") || q.Contains("药材") || q.Contains("矿")) return isMaterial;
             if (q.Contains("其他") || q.Contains("杂物") || q.Contains("虫")) return isOther;
             return false;
+        }
+
+        // 赠物回执用:把收到的物品讲成「名字(品阶·类别)」。AI 收到礼物后 prompt 里只有物名时
+        // 常瞎猜物品(issue #2:「木质钗子」被当成一幅画);补上真实品阶与类别,让它据实回应。
+        // 品阶/类别全部读游戏配置,任何一步失败都静默退回裸名,绝不阻断赠物回执。
+        private static string DescribeGiftedItem(GiftableItem item)
+        {
+            if (item == null) return "";
+            string name = (item.Name ?? "").Trim();
+            if (name.Length == 0) return "";
+            string grade = ItemGradeSuffix(item.Key);         // 「(九品)」或 ""
+            string cat = null;
+            try { cat = ItemCategoryLabel(item.Key); } catch { }
+            if (string.IsNullOrEmpty(cat) || cat == name) return name + grade;   // 资源名本身就是类别,不重复
+            string g = grade.Length > 2 ? grade.Substring(1, grade.Length - 2) : "";
+            return name + "(" + g + (g.Length > 0 ? "·" : "") + cat + ")";
+        }
+
+        // 物品类别/装备部位短标签(兵器/衣物/护具/佩饰/代步/食物/茶酒/药物/毒药/材料/工具/书籍/促织/资源名)。
+        // 装备按 NpcSnapshotReader 同款槽组逐槽 IsItemMeetSlot 探测;读不出返回 null。
+        private static string ItemCategoryLabel(GameData.Domains.Item.ItemKey key)
+        {
+            sbyte it = key.ItemType; short tpl = key.TemplateId;
+            bool isResource = false;
+            try { isResource = GameData.Domains.Item.ItemTemplateHelper.IsMiscResource(it, tpl); } catch { }
+            if (isResource)
+            {
+                if (tpl == 6) return "银钱";
+                try { var rn = StripTags(Config.ResourceType.Instance[(sbyte)tpl].Name); if (!string.IsNullOrWhiteSpace(rn)) return rn; } catch { }
+                return "资源";
+            }
+            if (it >= 0 && it <= 4) return EquipPartLabel(key);
+            switch (it)
+            {
+                case 5: return "材料";
+                case 6: return "工具";
+                case 7: return "食物";
+                case 8:
+                    try { if (GameData.Domains.Item.ItemTemplateHelper.GetMedicineItemPoisonType(it, tpl) >= 0) return "毒药"; } catch { }
+                    return "药物";
+                case 9: return "茶酒";
+                case 10: return "书籍";
+                case 11: return "促织";
+                default: return null;
+            }
+        }
+
+        // 装备部位短名:逐槽探测首个可入槽再按槽组命名(槽组映射与 NpcSnapshotReader 一致)。
+        private static string EquipPartLabel(GameData.Domains.Item.ItemKey key)
+        {
+            for (sbyte slot = 0; slot < 17; slot++)
+            {
+                bool meet = false;
+                try { meet = GameData.Domains.Character.EquipmentSlotHelper.IsItemMeetSlot(slot, key); } catch { }
+                if (!meet) continue;
+                if (slot == 0 || slot == 1 || slot == 2) return "兵器";
+                if (slot == 4) return "衣物";
+                if (slot == 3 || slot == 5 || slot == 6 || slot == 7) return "护具";
+                if (slot == 11 || slot == 12 || slot == 13) return "代步";
+                return "佩饰";   // 8,9,10,14,15,16:佩饰(含头饰/囊袋)
+            }
+            return null;
         }
 
         // 查询用:把名字列表按 keyword 精确搜(NameHit 模糊匹配);keyword 空=全部。
