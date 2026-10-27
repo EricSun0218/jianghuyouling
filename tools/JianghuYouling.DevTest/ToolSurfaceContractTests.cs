@@ -84,6 +84,7 @@ namespace JianghuYouling.DevTest
         public static void Run()
         {
             Console.WriteLine("=== 全 Mod 稳定工具面精确契约自测（63）===");
+            TaiwuActionAuthorizationTests.Run();
             var maximal = ToolRegistry.BuildConversationTools(new ToolContext
             {
                 IsMerchant = true,

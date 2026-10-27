@@ -5732,6 +5732,14 @@ namespace JianghuYouling
             catch
             { guard.Allowed = false; guard.Error = "工具参数不是有效 JSON"; done?.Invoke(guard); yield break; }
             Func<string, string> value = key => args[key]?.ToString();
+            if (!TaiwuActionAuthorization.AllowsModelTool(toolName))
+            {
+                guard.Allowed = false;
+                guard.Error = "此类太吾付出只能由太吾使用对话窗按钮确认执行，当前没有执行。"
+                    + "你可以据实说明愿学愿收，但不得替太吾决定或假称已经收下。";
+                done?.Invoke(guard);
+                yield break;
+            }
             var physicalEndpoints = new List<int>();
             Action<int> physical = id => { if (id > 0 && !physicalEndpoints.Contains(id)) physicalEndpoints.Add(id); };
             int npc = snap.NpcId, taiwu = snap.TaiwuId;
@@ -6539,13 +6547,13 @@ namespace JianghuYouling
                                 : ("太吾随身并无「" + kw + "」。太吾确有之物共 " + names.Count + " 样,换个词或不填 keyword 查全部再挑。" + wealthLine + booksLine));
                         }
                         else
-                            onResult("太吾随身、可赠你的物什(他要送你时按名收,共 " + names.Count + " 样):" + string.Join("、", names) + wealthLine + booksLine);
+                            onResult("太吾随身、可赠你的物什(实际交付须由他点击「赠物」按钮,共 " + names.Count + " 样):" + string.Join("、", names) + wealthLine + booksLine);
                     }
                     yield break;
                 case "query_taiwu_skills":
                     yield return RefreshTaiwuHoldings(taiwu);
                     {
-                        // 武学/技艺合一:统一名单,不分类型(taiwu_teach/taiwu_write_book 会按名自动判定)
+                        // 武学/技艺合一:统一名单供据实谈论；实际付出只由太吾按钮确认。
                         var all = NamesOf(_taiwuHoldings?.CombatSkills, x => x.Name);
                         all.AddRange(NamesOf(_taiwuHoldings?.LifeSkills, x => x.Name));
                         if (all.Count == 0) { onResult("太吾此刻没有可传授于你的本事。"); yield break; }
@@ -6554,11 +6562,11 @@ namespace JianghuYouling
                         {
                             var hit = all.FindAll(n => NameHit(n, kw));
                             onResult(hit.Count > 0
-                                ? ("太吾会的(含「" + kw + "」):" + string.Join("、", hit) + "。亲授用 taiwu_teach,成书相赠用 taiwu_write_book。")
+                                ? ("太吾会的(含「" + kw + "」):" + string.Join("、", hit) + "。实际亲授或成书相赠须由太吾点击对应按钮。")
                                 : ("太吾不会「" + kw + "」。他能传你的:" + string.Join("、", all) + "。"));
                         }
                         else
-                            onResult("太吾会、可传你或可回忆成书给你的本事(武学技艺不分,亲授用 taiwu_teach,成书用 taiwu_write_book):" + string.Join("、", all));
+                            onResult("太吾会、可传你或可回忆成书给你的本事(武学技艺不分;实际亲授或成书相赠须由太吾点击对应按钮):" + string.Join("、", all));
                     }
                     yield break;
                 case "query_npc_secrets":
