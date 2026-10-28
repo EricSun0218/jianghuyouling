@@ -404,7 +404,7 @@ namespace JianghuYouling
     /// <summary>
     /// TMP_InputField.KeyPressed is protected and non-virtual, so a subclass cannot inspect
     /// the exact buffered Event that base.OnUpdateSelected is about to process.  Frame-wide
-    /// Input.GetKey is not equivalent: under a stalled frame Ctrl may be released after the
+    /// Input.GetKey is not equivalent: under a stalled frame Ctrl/Shift may be released after the
     /// Enter event was queued.  This narrowly-scoped patch uses that event's own modifier and
     /// temporarily selects TMP's native multiline path only for SafeChatInputField instances.
     /// Append therefore retains native forward/reverse selection replacement and IME handling.
@@ -426,7 +426,7 @@ namespace JianghuYouling
             var field = __instance as SafeChatInputField;
             if (field == null || evt == null || field.lineType != TMP_InputField.LineType.MultiLineSubmit) return;
             if (evt.keyCode != KeyCode.Return && evt.keyCode != KeyCode.KeypadEnter) return;
-            if ((evt.modifiers & EventModifiers.Control) == 0) return; // covers left and right Ctrl on Windows
+            if ((evt.modifiers & (EventModifiers.Control | EventModifiers.Shift)) == 0) return;
             __state = new PatchState { Field = field, Original = field.lineType, Changed = true };
             field.lineType = TMP_InputField.LineType.MultiLineNewline;
         }

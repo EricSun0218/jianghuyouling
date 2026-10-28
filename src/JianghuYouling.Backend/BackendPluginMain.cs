@@ -200,7 +200,10 @@ namespace JianghuYouling.Backend
                         int npcMoney = src.GetResource(6);   // ResourceType.Money = 6:NPC 现有银钱
                         if (npcMoney <= 0) return Fail("no_money", "NPC 囊中羞涩,无钱可赠");
                         if (amount > npcMoney) amount = npcMoney;   // 不能赠出超过自己所有的
-                        TransferResourceChecked(context, src, dst, (sbyte)6, amount);
+                        ApplyTransferThing(context, npcId, src, dst, new TransferThing
+                        {
+                            IsResource = true, ResourceType = 6, Amount = amount
+                        }, TransferIntent.Gift);
                         if (bonus != 0) DomainManager.Character.ChangeFavorabilityOptional(context, src, dst, bonus, -1);
                         var okSilver = new SerializableModData(); okSilver.Set("success", true); okSilver.Set("message", "ok"); okSilver.Set("amount", amount); return okSilver;
                     }
@@ -294,7 +297,10 @@ namespace JianghuYouling.Backend
                             int haveRes = src.GetResource(resType);
                             if (haveRes <= 0) return Fail("not_owned", "NPC 此资源已无,无法相赠");
                             int giveRes = want < haveRes ? want : haveRes;   // 不能赠出超过其所有
-                            TransferResourceChecked(context, src, dst, resType, giveRes);
+                            ApplyTransferThing(context, npcId, src, dst, new TransferThing
+                            {
+                                IsResource = true, ResourceType = resType, Amount = giveRes
+                            }, TransferIntent.Gift);
                             if (bonus != 0) DomainManager.Character.ChangeFavorabilityOptional(context, src, dst, bonus, -1);
                             var okRes = new SerializableModData(); okRes.Set("success", true); okRes.Set("message", "ok"); okRes.Set("amount", giveRes); return okRes;
                         }
@@ -1379,7 +1385,10 @@ namespace JianghuYouling.Backend
                             int haveMoney = src.GetResource((sbyte)6);
                             if (haveMoney <= 0) return Fail("not_owned", "太吾身上没有银钱,无可相赠");
                             int giveMoney = want < haveMoney ? want : haveMoney;
-                            TransferResourceChecked(context, src, dst, (sbyte)6, giveMoney);
+                            ApplyTransferThing(context, taiwuId, src, dst, new TransferThing
+                            {
+                                IsResource = true, ResourceType = 6, Amount = giveMoney
+                            }, TransferIntent.Gift);
                             var okM = new SerializableModData(); okM.Set("success", true); okM.Set("message", "ok"); okM.Set("amount", giveMoney); return okM;
                         }
                         if (ItemTemplateHelper.IsMiscResource((sbyte)it, (short)t))   // 食材/药材/布料/矿石等资源
@@ -1387,7 +1396,10 @@ namespace JianghuYouling.Backend
                             sbyte resType = (sbyte)t; int haveRes = src.GetResource(resType);
                             if (haveRes <= 0) return Fail("not_owned", "太吾此资源已无,无可相赠");
                             int giveRes = want < haveRes ? want : haveRes;
-                            TransferResourceChecked(context, src, dst, resType, giveRes);
+                            ApplyTransferThing(context, taiwuId, src, dst, new TransferThing
+                            {
+                                IsResource = true, ResourceType = resType, Amount = giveRes
+                            }, TransferIntent.Gift);
                             var okR = new SerializableModData(); okR.Set("success", true); okR.Set("message", "ok"); okR.Set("amount", giveRes); return okR;
                         }
                         var reqKey = new ItemKey((sbyte)it, (byte)modSt, (short)t, id);
@@ -1594,17 +1606,18 @@ namespace JianghuYouling.Backend
                             !DomainManager.Character.TryGetElement_Objects(npcId, out npc2) || npc2 == null)
                             return Fail("invalid_char", "角色无效");
                         short tplS = (short)tpl;
+                        int readingState = 0;
                         if (kind == "life")
                         {
-                            byte prof = 0; bool known = false;
+                            bool known = false;
                             var taiwuLifeSkills = taiwu2.GetLearnedLifeSkills();
                             if (taiwuLifeSkills != null)
                                 foreach (var ls in taiwuLifeSkills)
                                     if (ls.SkillTemplateId == tplS)
-                                    { prof = ls.ReadingState; known = true; break; }
+                                    { readingState = ls.ReadingState; known = true; break; }
                             if (!known) return Fail("not_known", "太吾并未通晓此技艺");
                             if (npc2.FindLearnedLifeSkillIndex(tplS) >= 0) return Fail("already", "对方已通晓此技艺");
-                            try { DomainManager.Character.LearnLifeSkill(context, npcId, tplS, prof); }
+                            try { DomainManager.Character.LearnLifeSkill(context, npcId, tplS, (byte)readingState); }
                             catch (Exception e)
                             {
                                 if (npc2.FindLearnedLifeSkillIndex(tplS) < 0)
@@ -1617,10 +1630,9 @@ namespace JianghuYouling.Backend
                         {
                             if (!HasLearnedCombatSkill(taiwu2, tplS)) return Fail("not_known", "太吾并未习得此武学");
                             if (HasLearnedCombatSkill(npc2, tplS)) return Fail("already", "对方已习得此武学");
-                            ushort prof = 0;
                             var cs = DomainManager.CombatSkill.GetCharCombatSkills(taiwuId);
-                            if (cs != null && cs.ContainsKey(tplS)) prof = cs[tplS].GetReadingState();
-                            try { DomainManager.Character.LearnCombatSkill(context, npcId, tplS, prof); }
+                            if (cs != null && cs.ContainsKey(tplS)) readingState = cs[tplS].GetReadingState();
+                            try { DomainManager.Character.LearnCombatSkill(context, npcId, tplS, (ushort)readingState); }
                             catch (Exception e)
                             {
                                 if (!HasLearnedCombatSkill(npc2, tplS))
@@ -1629,6 +1641,7 @@ namespace JianghuYouling.Backend
                             if (!HasLearnedCombatSkill(npc2, tplS))
                                 return Indeterminate("teach_combat_postcondition_indeterminate", "武学传授接口已返回但受学者仍未学会");
                         }
+                        RecordTaiwuTeachLifeRecords(taiwu2, npc2, tplS, kind, readingState);
                         var okT = new SerializableModData(); okT.Set("success", true); okT.Set("message", "ok"); return okT;
                     }
                     case "query_npc_study_progress":   // 只读：NPC 尚未完成的武学修炼与背包阅读候选。
@@ -2118,6 +2131,10 @@ namespace JianghuYouling.Backend
                                 "秘籍交付只完成了部分写入，且未能确认补偿已完整恢复"
                                 + (deliveryError == null ? "" : ":" + deliveryError.GetType().Name));
                         }
+                        RecordGiftLifeRecord(npcId, npcC, taiwuC, new TransferThing
+                        {
+                            Key = bookKey, Amount = 1
+                        }, TransferIntent.Gift);
                         string bname = null; try { bname = ItemTemplateHelper.GetName((sbyte)10, bookTpl); } catch { }
                         var okW = new SerializableModData(); okW.Set("success", true); okW.Set("message", "ok"); okW.Set("name", bname ?? "秘籍"); okW.Set("lost", damaged); return okW;   // lost:残页数,供 NPC 自知、对话体现
                     }
@@ -4089,11 +4106,13 @@ namespace JianghuYouling.Backend
             if (thing.IsResource)
             {
                 TransferResourceChecked(context, src, dst, thing.ResourceType, thing.Amount);
+                RecordGiftLifeRecord(srcId, src, dst, thing, intent);
                 return receipt;
             }
             if (thing.IsEating)
             {
                 TransferEatingItemToInventory(context, srcId, src, dst, thing, intent);
+                RecordGiftLifeRecord(srcId, src, dst, thing, intent);
                 return receipt;
             }
             if (thing.IsEquipped)
@@ -4128,7 +4147,6 @@ namespace JianghuYouling.Backend
                     // 即使 ChangeEquipment 在写完槽位与背包后由通知尾调用抛错，
                     // 权威后验满足时也应继续同一事务，不能把已卸下的装备遗留在来源背包。
                     TransferInventoryChecked(context, src, dst, thing.Key, 1, intent);
-                    return receipt;
                 }
                 catch (Exception transferError)
                 {
@@ -4144,9 +4162,56 @@ namespace JianghuYouling.Backend
                     throw new InvalidOperationException("装备转移失败且补偿恢复未完整落地",
                         transferError);
                 }
+                RecordGiftLifeRecord(srcId, src, dst, thing, intent);
+                return receipt;
             }
             TransferInventoryChecked(context, src, dst, thing.Key, thing.Amount, intent);
+            RecordGiftLifeRecord(srcId, src, dst, thing, intent);
             return receipt;
+        }
+
+        private static void RecordGiftLifeRecord(int srcId, Character src, Character dst,
+            TransferThing thing, TransferIntent intent)
+        {
+            if (intent != TransferIntent.Gift) return;
+            var lifeRecords = DomainManager.LifeRecord.GetLifeRecordCollection();
+            int currDate = DomainManager.World.GetCurrDate();
+            var location = src.GetLocation();
+            if (thing.IsResource)
+                lifeRecords.AddGiveResource(srcId, currDate, dst.GetId(), location,
+                    thing.ResourceType, thing.Amount);
+            else
+                lifeRecords.AddGiveItem(srcId, currDate, dst.GetId(), location,
+                    thing.Key.ItemType, thing.Key.TemplateId);
+        }
+
+        private static void RecordTaiwuTeachLifeRecords(Character teacher, Character learner,
+            short skillTemplateId, string kind, int readingState)
+        {
+            var lifeRecords = DomainManager.LifeRecord.GetLifeRecordCollection();
+            int currDate = DomainManager.World.GetCurrDate();
+            var location = teacher.GetLocation();
+            int teacherId = teacher.GetId(), learnerId = learner.GetId();
+            bool life = kind == "life";
+            short bookId = life
+                ? Config.LifeSkill.Instance[skillTemplateId].SkillBookId
+                : Config.CombatSkill.Instance[skillTemplateId].BookId;
+            bool recordedPage = false;
+            for (int page = 0; page < 5; page++)
+            {
+                if ((readingState & (1 << page)) == 0) continue;
+                recordedPage = true;
+                if (life)
+                    lifeRecords.AddLearnLifeSkillWithInstructionSucceed(learnerId, currDate,
+                        teacherId, location, 10, bookId, page + 1);
+                else
+                    lifeRecords.AddLearnCombatSkillWithInstructionSucceed(learnerId, currDate,
+                        teacherId, location, 10, bookId, page + 1);
+            }
+            if (recordedPage) return;
+            // 本体没有“师父指点但零书页”的记录格式；此时只记真实习得，不虚构第一篇。
+            if (life) lifeRecords.AddLearnLifeSkill(learnerId, currDate, location, skillTemplateId);
+            else lifeRecords.AddLearnCombatSkill(learnerId, currDate, location, skillTemplateId);
         }
 
         private const int NativeResourceCap = 999999999;

@@ -5223,6 +5223,11 @@ namespace JianghuYouling.DevTest
                             await stream.WriteAsync(header, 0, header.Length).ConfigureAwait(false);
                             await stream.WriteAsync(payload, 0, payload.Length).ConfigureAwait(false);
                             await stream.FlushAsync().ConfigureAwait(false);
+                            connection.Client.Shutdown(SocketShutdown.Send);
+                            var drain = new byte[1024];
+                            using (var eofTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(2)))
+                                while (await stream.ReadAsync(drain, 0, drain.Length, eofTimeout.Token)
+                                    .ConfigureAwait(false) > 0) { }
                         }
                     }
                 }
@@ -5238,6 +5243,10 @@ namespace JianghuYouling.DevTest
             LlmToolResult second = client.SendToolRoundAsync(messages, tools, "auto", 100, 0.1,
                 CancellationToken.None, 10).GetAwaiter().GetResult();
             server.GetAwaiter().GetResult();
+            if (!first.Ok || !second.Ok || bodies.Count != 3)
+                Console.Error.WriteLine("[OLLAMA_DIAG] fallback first_error=" + first.Error
+                    + " second_error=" + second.Error + " bodies=" + bodies.Count
+                    + " payload=" + string.Join("\n---\n", bodies));
 
             AssertEq("Ollama HTTP 400 工具模板错误会真实重试并恢复普通对话",
                 (first.Ok && first.Content == "普通对话可用").ToString(), "True");
@@ -5285,6 +5294,11 @@ namespace JianghuYouling.DevTest
                         await stream.WriteAsync(header, 0, header.Length).ConfigureAwait(false);
                         await stream.WriteAsync(payload, 0, payload.Length).ConfigureAwait(false);
                         await stream.FlushAsync().ConfigureAwait(false);
+                        connection.Client.Shutdown(SocketShutdown.Send);
+                        var drain = new byte[1024];
+                        using (var eofTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(2)))
+                            while (await stream.ReadAsync(drain, 0, drain.Length, eofTimeout.Token)
+                                .ConfigureAwait(false) > 0) { }
                     }
                 }
                 finally { listener.Stop(); }
@@ -5298,6 +5312,9 @@ namespace JianghuYouling.DevTest
                 null, null, null, "auto", 100, 0.1, CancellationToken.None, 10,
                 "本地Qwen3.8传输测试", LlmReasoningPolicy.Low).GetAwaiter().GetResult();
             server.GetAwaiter().GetResult();
+            if (!result.Ok)
+                Console.Error.WriteLine("[OLLAMA_DIAG] native_transport error=" + result.Error
+                    + " retry=" + result.RetryClass + " request=" + requestBody);
 
             AssertEq("本地 Qwen3.8 原生 NDJSON 真实传输完成",
                 (result.Ok && result.ToolCalls.Count == 1
@@ -5347,6 +5364,11 @@ namespace JianghuYouling.DevTest
                         await stream.WriteAsync(header, 0, header.Length).ConfigureAwait(false);
                         await stream.WriteAsync(payload, 0, payload.Length).ConfigureAwait(false);
                         await stream.FlushAsync().ConfigureAwait(false);
+                        connection.Client.Shutdown(SocketShutdown.Send);
+                        var drain = new byte[1024];
+                        using (var eofTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(2)))
+                            while (await stream.ReadAsync(drain, 0, drain.Length, eofTimeout.Token)
+                                .ConfigureAwait(false) > 0) { }
                     }
                 }
                 finally { listener.Stop(); }
@@ -5365,6 +5387,9 @@ namespace JianghuYouling.DevTest
                 null, null, null, "auto", 100, 0.1, CancellationToken.None, 10,
                 "本地Qwen3.8系统消息测试", LlmReasoningPolicy.Auto).GetAwaiter().GetResult();
             server.GetAwaiter().GetResult();
+            if (!result.Ok)
+                Console.Error.WriteLine("[OLLAMA_DIAG] system_transport error=" + result.Error
+                    + " retry=" + result.RetryClass + " request=" + requestBody);
 
             AssertEq("本地 Qwen3.8 多段系统提示合并后通过严格模板",
                 (result.Ok && result.Content == "合并成功").ToString(), "True");
@@ -11348,14 +11373,14 @@ namespace JianghuYouling.DevTest
                  && actionWindowSource.Contains("SetTextWithoutNotify(\"1\")")
                  && actionWindowSource.Contains("IList<TaiwuDirectActionSelection>"))
                     .ToString(), "True");
-            AssertEq("批量行动回执区分部分成功且不裁掉原有行动工具",
+            AssertEq("批量行动回执区分部分成功且禁止模型重复执行太吾付出工具",
                 (directActionSource.Contains("部分成功")
                  && directActionSource.Contains("BatchSucceeded")
                   && directActionSource.Contains("executedTool")
                   && directActionSource.Contains("TargetIds()")
                   && directActionSource.Contains("ForTarget(int targetId)")
-                  && directActionSource.Contains("完整工具表都必须保留")
-                 && !talkOrchestratorSource.Contains("IsRepeatedDirectTaiwuActionTool"))
+                  && directActionSource.Contains("等太吾付出动作只能由玩家按钮执行，你不得再次调用")
+                  && directActionSource.Contains("其他只读查询或不涉及太吾付出的合理工具仍可正常使用"))
                     .ToString(), "True");
 
             StructuredWorldBook.Document invalidName = StructuredWorldBook.Import("有效正文");

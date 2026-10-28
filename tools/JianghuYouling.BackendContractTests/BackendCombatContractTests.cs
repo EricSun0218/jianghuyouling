@@ -1134,6 +1134,18 @@ namespace JianghuYouling.BackendContractTests
                     "frontend Taiwu-to-NPC skill dispatch must allow template zero");
                 RequireContains(teachLife, "tpl = -1", "missing life-skill template sentinel");
                 RequireContains(taiwuTeach, "tpl = -1", "missing Taiwu-teach template sentinel");
+                RequireContains(taiwuTeach, "RecordTaiwuTeachLifeRecords(",
+                    "Taiwu teaching must create native instruction life records after the skill is learned");
+                RequireContains(backend, "AddLearnCombatSkillWithInstructionSucceed(",
+                    "combat instruction must use the native teacher/page life-record format");
+                RequireContains(backend, "AddLearnLifeSkillWithInstructionSucceed(",
+                    "life instruction must use the native teacher/page life-record format");
+                RequireContains(backend, "private static void RecordGiftLifeRecord(",
+                    "successful gifts need one shared native life-record writer");
+                RequireContains(backend, "AddGiveItem(",
+                    "item gifts must create native giver and recipient life records");
+                RequireContains(backend, "AddGiveResource(",
+                    "resource and money gifts must create native giver and recipient life records");
 
                 string addGoal = Slice(backend,
                     "private static SerializableModData AddGoal(",

@@ -71,8 +71,8 @@ namespace JianghuYouling
                 + "状态：" + state + "。这项行动发生在本轮模型调用之前，不得机械重复回执中"
                 + "已经落地的同一批选择。"
                 + "请以收件人的身份对这个真实结果自然回应；若回执失败或未确认，不得假称成功。"
-                + "按钮只是增加玩家直选入口；包括 " + executedTool
-                + " 在内的完整工具表都必须保留，仍可正常用于额外查询或新的合理行动。";
+                + executedTool + " 等太吾付出动作只能由玩家按钮执行，你不得再次调用；"
+                + "其他只读查询或不涉及太吾付出的合理工具仍可正常使用。";
         }
 
         internal static TaiwuDirectActionReceipt Combine(

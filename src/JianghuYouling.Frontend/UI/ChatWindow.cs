@@ -1153,7 +1153,7 @@ namespace JianghuYouling
         {
             return
                 "【功能速览】输入 /帮助 随时重看\n" +
-                "· 说话:回车发送;Ctrl+Enter 只换行不发送;群聊回复进行中再按回车可直接插话\n" +
+                "· 说话:回车发送;Ctrl/Shift+Enter 只换行不发送;群聊回复进行中再按回车可直接插话\n" +
                 "· 口述:点「口述」用 Windows 语音键入,识别文字只进输入框,看清楚再发\n" +
                 "· 代笔:点「代笔」替太吾拟话;默认会从单聊、群聊和灵儿页的真实发言逐渐模仿你的用词、口气和字数,设置中可关闭\n" +
                 "· 悔棋:每轮回话都可「重试」或「删除」,只抹掉那一轮沉淀的记忆,已办成的事不回退\n" +
@@ -4539,7 +4539,7 @@ namespace JianghuYouling
             _input.onSubmit.AddListener(delegate
             {
                 if (_busy && _groupMode && _group != null) GroupInterject(); else Send();
-            });   // 普通 Enter 提交；Ctrl+Enter 已由 SafeChatInputField 的 TMP 原生路径截获
+            });   // 普通 Enter 提交；Ctrl/Shift+Enter 已由 SafeChatInputField 的 TMP 原生路径截获
             // 输入框自适应高度:长消息折行后不再把前面的字顶出框外(修输入法多字母上移 bug)
             var grow = inputGo.AddComponent<ChatInputAutoGrow>();
             _inputGrow = grow;
@@ -4562,7 +4562,7 @@ namespace JianghuYouling
             var shortcutHint = NewText("ShortcutHint", inputGo.transform, 13, TextAlignmentOptions.MidlineLeft);
             Anchor(shortcutHint.rectTransform, new Vector2(0, 0), new Vector2(1, 0),
                 new Vector2(78, 9), new Vector2(-162, 47));
-            shortcutHint.text = "Enter 发送  ·  Ctrl+Enter 换行";
+            shortcutHint.text = "Enter 发送  ·  Ctrl/Shift+Enter 换行";
             shortcutHint.color = new Color(0.64f, 0.64f, 0.58f, 0.72f);
 
             // 「口述」复用崇祯的 Windows 原生 Win+H 路线：无额外 ASR 接口、无音频落盘、零模型 token。
@@ -4689,7 +4689,7 @@ namespace JianghuYouling
 
         void RestorePlaceholder()
         {
-            if (_input != null && _input.placeholder is TextMeshProUGUI ph) ph.text = "说点什么…(回车发送，Ctrl+Enter换行)";
+            if (_input != null && _input.placeholder is TextMeshProUGUI ph) ph.text = "说点什么…(回车发送，Ctrl/Shift+Enter换行)";
         }
 
         // 借游戏中文字体:游戏没把名签字体传进来时(1.0.17 改了布局取到 null),满场找任一已加载 TMP 字体借用,
