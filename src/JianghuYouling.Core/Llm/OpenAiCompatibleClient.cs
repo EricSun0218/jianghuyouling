@@ -2020,7 +2020,9 @@ namespace JianghuYouling.Core.Llm
             if (error == null) return "Unknown";
             var parts = new List<string>(3);
             for (Exception current = error; current != null && parts.Count < 3; current = current.InnerException)
-                parts.Add(current.GetType().Name);
+                parts.Add(current is System.Net.Sockets.SocketException socket
+                    ? current.GetType().Name + "(" + socket.SocketErrorCode + "/" + socket.NativeErrorCode + ")"
+                    : current.GetType().Name);
             return string.Join("<=", parts);
         }
 
