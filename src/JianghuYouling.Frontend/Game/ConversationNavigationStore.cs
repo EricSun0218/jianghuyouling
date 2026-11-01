@@ -8,8 +8,8 @@ using Newtonsoft.Json;
 namespace JianghuYouling
 {
     /// <summary>
-    /// Per-save visibility state for the conversation sidebar. Hiding only records a stable
-    /// navigation identity here; chat transcripts, group membership and memories are untouched.
+    /// Per-save visibility and pin state for the conversation sidebar. Only stable navigation
+    /// identities are stored here; chat transcripts, group membership and memories are untouched.
     /// </summary>
     public static class ConversationNavigationStore
     {
@@ -27,11 +27,13 @@ namespace JianghuYouling
             public uint WorldId;
             public int TaiwuId;
             public List<string> Hidden = new List<string>();
+            public List<string> Pinned = new List<string>();
         }
 
         public sealed class Snapshot
         {
             public List<string> Hidden = new List<string>();
+            public List<string> Pinned = new List<string>();
             public bool LoadReliable = true;
         }
 
@@ -49,6 +51,7 @@ namespace JianghuYouling
                     return CloneSnapshot(cached);
 
                 var all = new SortedSet<string>(StringComparer.Ordinal);
+                var pinned = new SortedSet<string>(StringComparer.Ordinal);
                 bool reliable = true;
                 foreach (int shardIndex in DiscoverShardIndexes(taiwuId))
                 {
@@ -59,10 +62,13 @@ namespace JianghuYouling
                     }
                     foreach (string identity in state.Hidden)
                         all.Add(identity);
+                    foreach (string identity in state.Pinned)
+                        pinned.Add(identity);
                 }
                 var snapshot = new Snapshot
                 {
                     Hidden = reliable ? new List<string>(all) : new List<string>(),
+                    Pinned = reliable ? new List<string>(pinned) : new List<string>(),
                     LoadReliable = reliable,
                 };
                 // UI refreshes are frequent and run on Unity's main thread. Keep the last complete,
@@ -79,6 +85,18 @@ namespace JianghuYouling
         }
 
         public static bool Hide(int taiwuId, string identity)
+            => SetMembership(taiwuId, identity, true, true);
+
+        public static bool Restore(int taiwuId, string identity)
+            => SetMembership(taiwuId, identity, true, false);
+
+        public static bool SetPinned(int taiwuId, string identity, bool pinned)
+            => SetMembership(taiwuId, identity, false, pinned);
+
+        private static List<string> Membership(State state, bool hidden)
+            => hidden ? state.Hidden : state.Pinned;
+
+        private static bool SetMembership(int taiwuId, string identity, bool hidden, bool present)
         {
             if (taiwuId <= 0 || !ValidIdentity(identity)) return false;
             lock (Gate)
@@ -90,24 +108,35 @@ namespace JianghuYouling
                     if (!TryLoadState(taiwuId, shardIndex, out State state)) return false;
                     loaded.Add(new KeyValuePair<int, State>(shardIndex, state));
                 }
-                foreach (var pair in loaded)
-                    if (pair.Value.Hidden.Contains(identity))
+                var matches = loaded.FindAll(pair => Membership(pair.Value, hidden).Contains(identity));
+                if (matches.Count > 1) return false;
+                if (matches.Count == 1)
+                {
+                    if (!present)
                     {
-                        CacheLoaded(taiwuId, loaded);
-                        return true;
+                        Membership(matches[0].Value, hidden).Remove(identity);
+                        if (!SaveState(taiwuId, matches[0].Key, matches[0].Value)) return false;
                     }
+                    CacheLoaded(taiwuId, loaded);
+                    return true;
+                }
+                if (!present)
+                {
+                    CacheLoaded(taiwuId, loaded);
+                    return true;
+                }
 
                 // 每片同时受条目数和 durable 文件字节上限约束；满片后只追加新片，
                 // 不再对全局集合排序截断，因此第 2049 个及之后的隐藏标记也不会静默丢失。
                 foreach (var pair in loaded)
                 {
                     State state = pair.Value;
-                    if (state.Hidden.Count >= MaxHiddenConversationsPerShard) continue;
-                    state.Hidden.Add(identity);
-                    Normalize(state, taiwuId);
-                    if (!state.Hidden.Contains(identity) || !DocumentFits(state))
+                    List<string> members = Membership(state, hidden);
+                    if (members.Count >= MaxHiddenConversationsPerShard) continue;
+                    members.Add(identity);
+                    if (!DocumentFits(state))
                     {
-                        state.Hidden.Remove(identity);
+                        members.Remove(identity);
                         continue;
                     }
                     if (!SaveState(taiwuId, pair.Key, state)) return false;
@@ -118,38 +147,11 @@ namespace JianghuYouling
                 int next = shards.Count == 0 ? 0 : shards[shards.Count - 1] + 1;
                 if (next < 0 || next >= MaxShardCount) return false;
                 State fresh = NewState(taiwuId);
-                fresh.Hidden.Add(identity);
+                Membership(fresh, hidden).Add(identity);
                 Normalize(fresh, taiwuId);
-                if (!fresh.Hidden.Contains(identity) || !DocumentFits(fresh)
+                if (!Membership(fresh, hidden).Contains(identity) || !DocumentFits(fresh)
                     || !SaveState(taiwuId, next, fresh)) return false;
                 loaded.Add(new KeyValuePair<int, State>(next, fresh));
-                CacheLoaded(taiwuId, loaded);
-                return true;
-            }
-        }
-
-        public static bool Restore(int taiwuId, string identity)
-        {
-            if (taiwuId <= 0 || !ValidIdentity(identity)) return false;
-            lock (Gate)
-            {
-                var loaded = new List<KeyValuePair<int, State>>();
-                foreach (int shardIndex in DiscoverShardIndexes(taiwuId))
-                {
-                    if (!TryLoadState(taiwuId, shardIndex, out State state)) return false;
-                    loaded.Add(new KeyValuePair<int, State>(shardIndex, state));
-                }
-                var matches = new List<KeyValuePair<int, State>>();
-                foreach (var pair in loaded)
-                    if (pair.Value.Hidden.Contains(identity)) matches.Add(pair);
-                if (matches.Count == 0) return true;
-                // 正常写路径保证一个 identity 只存在于一片。若人工编辑造成重复，先拒绝，
-                // 避免多文件提交只成功一半而留下更难恢复的部分状态。
-                if (matches.Count != 1) return false;
-                State target = matches[0].Value;
-                target.Hidden.Remove(identity);
-                Normalize(target, taiwuId);
-                if (!SaveState(taiwuId, matches[0].Key, target)) return false;
                 CacheLoaded(taiwuId, loaded);
                 return true;
             }
@@ -160,10 +162,19 @@ namespace JianghuYouling
             if (taiwuId <= 0 || oldNpcId < 0 || newNpcId < 0 || oldNpcId == newNpcId) return true;
             string oldIdentity = "single:" + taiwuId + ":" + oldNpcId;
             string newIdentity = "single:" + taiwuId + ":" + newNpcId;
-            Snapshot snapshot = Load(taiwuId);
-            if (!snapshot.LoadReliable || !snapshot.Hidden.Contains(oldIdentity)) return snapshot.LoadReliable;
-            // 先写新身份，再移除旧身份；中断只会暂时同时隐藏，不会意外暴露会话。
-            return Hide(taiwuId, newIdentity) && Restore(taiwuId, oldIdentity);
+            lock (Gate)
+            {
+                Snapshot snapshot = Load(taiwuId);
+                if (!snapshot.LoadReliable) return false;
+                bool hidden = snapshot.Hidden.Contains(oldIdentity);
+                bool pinned = snapshot.Pinned.Contains(oldIdentity);
+                // Commit the destination before removing either source flag. A failed transfer
+                // retains the old identity, and retries never erase an existing destination pin.
+                return (!hidden || Hide(taiwuId, newIdentity))
+                    && (!pinned || SetPinned(taiwuId, newIdentity, true))
+                    && (!hidden || Restore(taiwuId, oldIdentity))
+                    && (!pinned || SetPinned(taiwuId, oldIdentity, false));
+            }
         }
 
         private static string ScopeKey(int taiwuId)
@@ -174,6 +185,8 @@ namespace JianghuYouling
             {
                 Hidden = source?.Hidden == null
                     ? new List<string>() : new List<string>(source.Hidden),
+                Pinned = source?.Pinned == null
+                    ? new List<string>() : new List<string>(source.Pinned),
                 LoadReliable = source != null && source.LoadReliable,
             };
 
@@ -181,14 +194,21 @@ namespace JianghuYouling
             IEnumerable<KeyValuePair<int, State>> loaded)
         {
             var all = new SortedSet<string>(StringComparer.Ordinal);
+            var pinned = new SortedSet<string>(StringComparer.Ordinal);
             if (loaded != null)
                 foreach (var pair in loaded)
+                {
                     if (pair.Value?.Hidden != null)
                         foreach (string identity in pair.Value.Hidden)
                             if (ValidIdentity(identity)) all.Add(identity);
+                    if (pair.Value?.Pinned != null)
+                        foreach (string identity in pair.Value.Pinned)
+                            if (ValidIdentity(identity)) pinned.Add(identity);
+                }
             ReliableSnapshots[ScopeKey(taiwuId)] = new Snapshot
             {
                 Hidden = new List<string>(all),
+                Pinned = new List<string>(pinned),
                 LoadReliable = true,
             };
         }
@@ -227,15 +247,21 @@ namespace JianghuYouling
             state.Version = CurrentVersion;
             state.WorldId = JianghuYoulingPaths.CurrentWorldId;
             state.TaiwuId = taiwuId;
+            state.Hidden = NormalizeMembership(state.Hidden);
+            state.Pinned = NormalizeMembership(state.Pinned);
+        }
+
+        private static List<string> NormalizeMembership(List<string> members)
+        {
             var unique = new SortedSet<string>(StringComparer.Ordinal);
-            if (state.Hidden != null)
-                foreach (string identity in state.Hidden)
+            if (members != null)
+                foreach (string identity in members)
                 {
                     if (!ValidIdentity(identity)) continue;
                     unique.Add(identity);
                     if (unique.Count >= MaxHiddenConversationsPerShard) break;
                 }
-            state.Hidden = new List<string>(unique);
+            return new List<string>(unique);
         }
 
         private static bool SaveState(int taiwuId, int shardIndex, State state)
@@ -275,9 +301,13 @@ namespace JianghuYouling
                     || state.TaiwuId != expectedTaiwuId
                     || (state.WorldId != 0 && state.WorldId != expectedWorldId)
                     || state.Hidden == null
-                    || state.Hidden.Count > MaxHiddenConversationsPerShard)
+                    || state.Hidden.Count > MaxHiddenConversationsPerShard
+                    || state.Pinned == null
+                    || state.Pinned.Count > MaxHiddenConversationsPerShard)
                     return false;
                 foreach (string identity in state.Hidden)
+                    if (!ValidIdentity(identity)) return false;
+                foreach (string identity in state.Pinned)
                     if (!ValidIdentity(identity)) return false;
                 return true;
             }

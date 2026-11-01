@@ -4,6 +4,7 @@ using Game.Components.Avatar;
 using GameData.Domains.Character;
 using GameData.Domains.Character.Display;
 using JianghuYouling.Core.Web;
+using JianghuYouling.Core.Prompt;
 using TMPro;
 using UnityEngine;
 using UnityEngine.UI;
@@ -155,8 +156,8 @@ namespace JianghuYouling
                 AddBackground(root.transform);
                 // 本体的 AvatarSize.Normal 对固定人物会直接读取 NormalFace（半身像），
                 // 普通人物也使用同一规格。两个独立遮罩框保证参考图只保留上半身，不混入全身构图。
-                TaiwuAvatar left = AddPortrait(template, root.transform, new Vector2(-250f, 0f));
-                TaiwuAvatar right = AddPortrait(template, root.transform, new Vector2(250f, 0f));
+                TaiwuAvatar left = AddPortrait(template, root.transform, new Vector2(SceneImagePromptBuilder.NpcReferenceX, 0f));
+                TaiwuAvatar right = AddPortrait(template, root.transform, new Vector2(SceneImagePromptBuilder.PlayerReferenceX, 0f));
                 RefreshAvatar(left, npcId, npc);
                 RefreshAvatar(right, taiwuId, taiwu);
 

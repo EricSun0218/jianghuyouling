@@ -2927,32 +2927,44 @@ namespace JianghuYouling
 
         string BuildRoundImagePrompt(Round target)
         {
-            var context = new StringBuilder(4096);
+            var context = new List<SceneImageDialogueLine>();
             int targetIndex = _rounds.IndexOf(target);
             int from = System.Math.Max(0, targetIndex - 5);
+            string npcName = _groupMode ? null : _npcName;
             for (int i = from; i <= targetIndex && i < _rounds.Count; i++)
             {
                 Round round = _rounds[i];
                 if (round == null) continue;
-                AppendBounded(context, "太吾：" + (round.playerInput ?? ""), 8000);
-                AppendBounded(context, "对方：" + (round.replyText ?? ""), 8000);
+                if (round.mode == RMode.Group)
+                {
+                    foreach (GroupChatOrchestrator.Line line in round.groupLines)
+                    {
+                        if (line == null) continue;
+                        context.Add(new SceneImageDialogueLine
+                        {
+                            SpeakerId = line.SpeakerId, IsPlayer = line.IsTaiwu,
+                            SpeakerName = line.Speaker, Text = line.Text,
+                        });
+                        if (!line.IsTaiwu && line.SpeakerId == target.replyNpcId
+                            && !TalkOrchestrator.IsUnresolvedNpcName(line.Speaker)) npcName = line.Speaker;
+                    }
+                }
+                else
+                {
+                    context.Add(new SceneImageDialogueLine
+                    {
+                        SpeakerId = _taiwuId, IsPlayer = true,
+                        SpeakerName = "太吾", Text = round.playerInput,
+                    });
+                    context.Add(new SceneImageDialogueLine
+                    {
+                        SpeakerId = round.replyNpcId, SpeakerName = _npcName, Text = round.replyText,
+                    });
+                }
             }
             ImageGenerationConfig.Values config = ImageGenerationConfig.LoadRaw();
-            var prompt = new StringBuilder(9000);
-            prompt.Append("参考图左侧是当前与太吾交谈人物的半身像，右侧是太吾的半身像。请准确保留两人的脸、发型、服饰、年龄感与辨识特征，生成一张横向 16:9、二人同处当前对话场景的完整武侠叙事画面。根据最近聊天判断地点、动作、距离、情绪和氛围；不要照搬参考图构图，不要添加字幕、对白、界面、边框、标志或水印，不要凭空增加主要人物。画面自然、细节丰富、人物关系明确。\n\n最近聊天：\n");
-            prompt.Append(context);
-            if (!string.IsNullOrWhiteSpace(config.Style))
-                prompt.Append("\n附加画面风格：").Append(config.Style.Trim());
-            if (prompt.Length > ImageGenerationClient.MaxPromptChars)
-                return prompt.ToString(0, ImageGenerationClient.MaxPromptChars);
-            return prompt.ToString();
-        }
-
-        static void AppendBounded(StringBuilder target, string line, int maximum)
-        {
-            if (target.Length >= maximum || string.IsNullOrWhiteSpace(line)) return;
-            int take = System.Math.Min(line.Length, maximum - target.Length);
-            target.Append(line, 0, take).Append('\n');
+            return SceneImagePromptBuilder.Build(_taiwuId, target.replyNpcId,
+                TalkOrchestrator.IsUnresolvedNpcName(npcName) ? null : npcName, context, config.Style);
         }
 
         GameObject AddGeneratedImageRow(Texture2D texture, int width, int height)
@@ -4958,6 +4970,10 @@ namespace JianghuYouling
         static GameObject _barBottomSpacer;
         const float NavigationRowPitch = 60f; // 58px row + 2px layout spacing
         const int NavigationRowPoolSize = 32;
+        static readonly Color NavigationNormalColor = new Color(0.105f, 0.12f, 0.112f, 0.96f);
+        static readonly Color NavigationPinnedColor = new Color(0.15f, 0.16f, 0.125f, 0.96f);
+        static readonly Color NavigationActiveColor = new Color(0.19f, 0.25f, 0.22f, 0.99f);
+        static readonly Color NavigationPinnedActiveColor = new Color(0.21f, 0.25f, 0.19f, 0.99f);
         static readonly List<SessionNavEntry> _visibleNavigation =
             new List<SessionNavEntry>();
         static int _navigationWindowFirst = -1;
@@ -4994,6 +5010,7 @@ namespace JianghuYouling
             public long SortKey;
             public int UnreadCount;
             public bool IsDead;
+            public bool IsPinned;
         }
 
         sealed class NavigationIndexRebuildResult
@@ -5697,7 +5714,7 @@ namespace JianghuYouling
             if (tab != _active) RefreshTabs();
         }
 
-        /// <summary>玩家消息一进入会话流便置顶；点击页签本身不会改变左栏顺序。</summary>
+        /// <summary>玩家消息进入会话流便更新组内活跃排序；不会越过置顶分区，点击页签本身不重排。</summary>
         public static void OnMessageSent(ChatTab tab)
         {
             if (tab == null) return;
@@ -6225,8 +6242,9 @@ namespace JianghuYouling
                 && string.Equals(candidate.Identity, entry.Identity,
                     System.StringComparison.Ordinal));
             if (index < 0) return false;
+            entry.IsPinned = _visibleNavigation[index].IsPinned;
             _visibleNavigation.RemoveAt(index);
-            _visibleNavigation.Insert(0, entry);
+            ConversationNavigationOrder.InsertSorted(_visibleNavigation, entry, CompareNavigationEntries);
             if (_barScroll != null) _barScroll.verticalNormalizedPosition = 1f;
             _navigationWindowFirst = -1;
             RefreshNavigationWindow(true);
@@ -6261,13 +6279,17 @@ namespace JianghuYouling
                 byIdentity[live.Identity] = live;
             }
             var entries = new List<SessionNavEntry>(byIdentity.Values);
-            entries.Sort((a, b) =>
-            {
-                int order = b.SortKey.CompareTo(a.SortKey);
-                return order != 0 ? order : string.Compare(a.Title, b.Title, System.StringComparison.Ordinal);
-            });
+            ConversationNavigationStore.Snapshot navigation = ConversationNavigationStore.Load(taiwuId);
+            var pinned = new HashSet<string>(navigation.Pinned, System.StringComparer.Ordinal);
+            foreach (SessionNavEntry entry in entries)
+                entry.IsPinned = pinned.Contains(entry.Identity);
+            entries.Sort(CompareNavigationEntries);
             return entries;
         }
+
+        static int CompareNavigationEntries(SessionNavEntry a, SessionNavEntry b)
+            => ConversationNavigationOrder.Compare(a.IsPinned, a.SortKey, a.Title, a.Identity,
+                b.IsPinned, b.SortKey, b.Title, b.Identity);
 
         static void EnsurePersistedNavigation(int taiwuId)
         {
@@ -6936,6 +6958,22 @@ namespace JianghuYouling
             RefreshTabs();
         }
 
+        static void ToggleNavigationPin(string boundIdentity, SessionNavEntry entry)
+        {
+            if (entry == null || entry.TaiwuId <= 0
+                || entry.TaiwuId != ResolveCurrentTaiwuId()
+                || !WorldLifecycle.HasWorldIdentity
+                || _navigationGeneration != WorldLifecycle.Generation
+                || !NavigationRowBindingPolicy.IsCurrent(boundIdentity, entry.Identity)) return;
+            if (!ConversationNavigationStore.SetPinned(entry.TaiwuId, entry.Identity, !entry.IsPinned))
+            {
+                (entry.Tab ?? _active)?.AddSysNotice("（置顶状态保存失败，列表顺序和聊天记录没有变化）");
+                return;
+            }
+            // Persist first, then rebuild only the cached navigation view. No transcript is touched.
+            RefreshTabs();
+        }
+
         static SidebarConversationRow AddSessionRow(SessionNavEntry entry)
         {
             if (entry == null) return null;
@@ -6970,7 +7008,7 @@ namespace JianghuYouling
             title.rectTransform.anchorMin = new Vector2(0, 0.43f);
             title.rectTransform.anchorMax = Vector2.one;
             title.rectTransform.offsetMin = new Vector2(12, 0);
-            title.rectTransform.offsetMax = new Vector2(-62, -3);
+            title.rectTransform.offsetMax = new Vector2(-86, -3);
 
             var subtitle = ChipText("Summary", "", go.transform,
                 new Color(0.55f, 0.61f, 0.57f, 1f), 13f, TextAlignmentOptions.Left);
@@ -6978,15 +7016,23 @@ namespace JianghuYouling
             subtitle.rectTransform.anchorMin = Vector2.zero;
             subtitle.rectTransform.anchorMax = new Vector2(1, 0.43f);
             subtitle.rectTransform.offsetMin = new Vector2(12, 3);
-            subtitle.rectTransform.offsetMax = new Vector2(-62, 0);
+            subtitle.rectTransform.offsetMax = new Vector2(-86, 0);
+
+            var actions = new GameObject("Actions", typeof(RectTransform));
+            actions.transform.SetParent(go.transform, false);
+            var actionsRt = actions.GetComponent<RectTransform>();
+            actionsRt.anchorMin = actionsRt.anchorMax = new Vector2(1f, 0.5f);
+            actionsRt.pivot = new Vector2(1f, 0.5f);
+            actionsRt.anchoredPosition = new Vector2(-8f, 0f);
+            actionsRt.sizeDelta = new Vector2(70f, 52f);
 
             var action = new GameObject("Hide", typeof(RectTransform), typeof(Image), typeof(Button));
-            action.transform.SetParent(go.transform, false);
+            action.transform.SetParent(actions.transform, false);
             var actionRt = action.GetComponent<RectTransform>();
             actionRt.anchorMin = actionRt.anchorMax = new Vector2(1f, 0.5f);
             actionRt.pivot = new Vector2(1f, 0.5f);
-            actionRt.anchoredPosition = new Vector2(-8f, 0f);
-            actionRt.sizeDelta = new Vector2(46f, 28f);
+            actionRt.anchoredPosition = new Vector2(0f, -14f);
+            actionRt.sizeDelta = new Vector2(70f, 24f);
             action.GetComponent<Image>().color = new Color(0.22f, 0.26f, 0.23f, 0.96f);
             var actionButton = action.GetComponent<Button>();
             actionButton.transition = Selectable.Transition.ColorTint;
@@ -7011,11 +7057,40 @@ namespace JianghuYouling
             actionLabel.rectTransform.offsetMin = Vector2.zero;
             actionLabel.rectTransform.offsetMax = Vector2.zero;
             actionLabel.raycastTarget = false;
+
+            var pin = new GameObject("Pin", typeof(RectTransform), typeof(Image), typeof(Button));
+            pin.transform.SetParent(actions.transform, false);
+            var pinRt = pin.GetComponent<RectTransform>();
+            pinRt.anchorMin = pinRt.anchorMax = new Vector2(1f, 0.5f);
+            pinRt.pivot = new Vector2(1f, 0.5f);
+            pinRt.anchoredPosition = new Vector2(0f, 14f);
+            pinRt.sizeDelta = new Vector2(70f, 24f);
+            pin.GetComponent<Image>().color = new Color(0.22f, 0.26f, 0.23f, 0.96f);
+            var pinButton = pin.GetComponent<Button>();
+            pinButton.transition = Selectable.Transition.ColorTint;
+            pinButton.colors = actionColors;
+            var pinCapture = pin.AddComponent<SidebarConversationRowActionCapture>();
+            pinCapture.row = row;
+            pinCapture.action = NavigationRowAction.Pin;
+            pinButton.onClick.AddListener(() =>
+            {
+                if (row.TryConsumeAction(NavigationRowAction.Pin,
+                    out string capturedIdentity, out SessionNavEntry current))
+                    ToggleNavigationPin(capturedIdentity, current);
+            });
+            var pinLabel = ChipText("Label", "置顶", pin.transform,
+                new Color(0.85f, 0.83f, 0.68f, 1f), 13f, TextAlignmentOptions.Center);
+            pinLabel.rectTransform.anchorMin = Vector2.zero;
+            pinLabel.rectTransform.anchorMax = Vector2.one;
+            pinLabel.rectTransform.offsetMin = Vector2.zero;
+            pinLabel.rectTransform.offsetMax = Vector2.zero;
+            pinLabel.raycastTarget = false;
             var hover = go.AddComponent<SidebarConversationRowHover>();
-            hover.action = action;
+            hover.action = actions;
             row.title = title;
             row.subtitle = subtitle;
-            row.action = action;
+            row.pinLabel = pinLabel;
+            row.action = actions;
             row.hover = hover;
             BindSessionRow(row, entry);
             return row;
@@ -7033,8 +7108,8 @@ namespace JianghuYouling
             row.entry = entry;
             if (row.background != null)
                 row.background.color = isActive
-                    ? new Color(0.19f, 0.25f, 0.22f, 0.99f)
-                    : new Color(0.105f, 0.12f, 0.112f, 0.96f);
+                    ? (entry.IsPinned ? NavigationPinnedActiveColor : NavigationActiveColor)
+                    : (entry.IsPinned ? NavigationPinnedColor : NavigationNormalColor);
             if (row.title != null)
             {
                 bool unread = !isActive && (entry.UnreadCount > 0
@@ -7055,12 +7130,16 @@ namespace JianghuYouling
                     ? "未读 " + entry.UnreadCount + " 条 · " + entry.Subtitle
                     : entry.Subtitle;
                 row.subtitle.text = Trunc(subtitle, 24);
+                row.subtitle.color = isActive
+                    ? new Color(0.65f, 0.71f, 0.66f, 1f)
+                    : new Color(0.55f, 0.61f, 0.57f, 1f);
             }
             if (row.hover != null)
             {
                 row.hover.keepVisible = isActive;
                 row.hover.RefreshVisibility();
             }
+            if (row.pinLabel != null) row.pinLabel.text = entry.IsPinned ? "取消置顶" : "置顶";
         }
 
         static bool TryPromoteNavigationRow(ChatTab tab)
@@ -7098,6 +7177,7 @@ namespace JianghuYouling
         public Image background;
         public TextMeshProUGUI title;
         public TextMeshProUGUI subtitle;
+        public TextMeshProUGUI pinLabel;
         public GameObject action;
         public SidebarConversationRowHover hover;
 

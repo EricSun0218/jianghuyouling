@@ -6,6 +6,7 @@ namespace JianghuYouling.Core.Behavior
     {
         Open,
         Hide,
+        Pin,
     }
 
     public static class NavigationRowBindingPolicy
@@ -38,6 +39,7 @@ namespace JianghuYouling.Core.Behavior
         private string _identity;
         private Capture _open;
         private Capture _hide;
+        private Capture _pin;
 
         public string Identity => _identity;
         public long Revision => _revision;
@@ -50,6 +52,7 @@ namespace JianghuYouling.Core.Behavior
             _revision++;
             _open = default(Capture);
             _hide = default(Capture);
+            _pin = default(Capture);
         }
 
         public void Clear()
@@ -58,6 +61,7 @@ namespace JianghuYouling.Core.Behavior
             _revision++;
             _open = default(Capture);
             _hide = default(Capture);
+            _pin = default(Capture);
         }
 
         public void CapturePointerDown(NavigationRowAction action)
@@ -69,13 +73,16 @@ namespace JianghuYouling.Core.Behavior
                 Identity = _identity,
             };
             if (action == NavigationRowAction.Hide) _hide = captured;
+            else if (action == NavigationRowAction.Pin) _pin = captured;
             else _open = captured;
         }
 
         public bool TryConsume(NavigationRowAction action, out string identity)
         {
-            Capture captured = action == NavigationRowAction.Hide ? _hide : _open;
+            Capture captured = action == NavigationRowAction.Hide ? _hide
+                : action == NavigationRowAction.Pin ? _pin : _open;
             if (action == NavigationRowAction.Hide) _hide = default(Capture);
+            else if (action == NavigationRowAction.Pin) _pin = default(Capture);
             else _open = default(Capture);
             bool current = captured.Present
                 && captured.Revision == _revision

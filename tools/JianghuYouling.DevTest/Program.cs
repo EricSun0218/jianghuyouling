@@ -72,6 +72,9 @@ namespace JianghuYouling.DevTest
                     OptionValue(args, "--image-protected-config"),
                     OptionValue(args, "--image-reference"));
             string protectedConfigPath = OptionValue(args, "--deepseek-protected-config");
+            if (args != null && Array.Exists(args,
+                a => string.Equals(a, "--scene-image-prompt-live", StringComparison.OrdinalIgnoreCase)))
+                return await SceneImagePromptTests.RunLive(protectedConfigPath);
             bool reasoningReplayLive = args != null && Array.Exists(args,
                 a => string.Equals(a, "--reasoning-replay-live", StringComparison.OrdinalIgnoreCase));
             if (reasoningReplayLive && string.IsNullOrWhiteSpace(protectedConfigPath))
@@ -176,6 +179,7 @@ namespace JianghuYouling.DevTest
                 a => string.Equals(a, "--conversation-sidebar-only",
                     StringComparison.OrdinalIgnoreCase)))
             {
+                ConversationPinTests.Run();
                 TestConversationNavigationStore();
                 TestConversationSessionIndexStore();
                 TestCurrentCommitReplicaPair();
@@ -330,7 +334,15 @@ namespace JianghuYouling.DevTest
                 return 0;
             }
 
+            if (args != null && Array.Exists(args,
+                a => string.Equals(a, "--scene-image-prompt-only", StringComparison.OrdinalIgnoreCase)))
+            {
+                SceneImagePromptTests.Run();
+                return 0;
+            }
+
             await TelemetryTests.Run();
+            SceneImagePromptTests.Run();
             ManualConversationSummaryTests.Run();
             ConversationHistoryPagingTests.Run();
             MonthlyOneShotTests.Run();
@@ -393,6 +405,7 @@ namespace JianghuYouling.DevTest
             TestMonthlyPoisonPolicy();
             TestTaiwuScenePresencePolicy();
             TestCompanionMonthlyCandidateStore();
+            ConversationPinTests.Run();
             TestConversationNavigationStore();
             TestWorldBookStoreDurability();
             TestThinkingPromptRule();
