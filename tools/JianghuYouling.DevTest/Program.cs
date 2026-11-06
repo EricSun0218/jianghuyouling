@@ -2117,7 +2117,7 @@ namespace JianghuYouling.DevTest
                     + "若你直接选择动作，代码会同轮自动补齐关系、受教者技能或秘闻候选；"
                     + "全部权威事实可靠就继续落地该动作，无法确认才返回未执行。"
                     + "send_message 只在因果确实需要交流时自然选择，不是完成门槛，也不计入上述三项、两类。"
-                    + "行动自然落定后直接停止调用工具；无需也不得为过月另写小说正文。"
+                    + "行动自然落定后直接停止调用工具，只回复‘本轮结束’，不能返回空消息；无需也不得为过月另写小说正文。"
                     + "完整工具面全部保留，不要写JSON、标题、清单或工具说明。"
                     + BehaviorDispositionPolicy.BuildMoodAndFameDirective(48, "小有侠名")),
                 LlmMessage.System(
@@ -2233,7 +2233,7 @@ namespace JianghuYouling.DevTest
                         + "当前成功实质行为=" + actionCount + "，类型="
                         + string.Join("、", categories.ToArray())
                         + (actionCount >= 3 && categories.Count >= 2
-                            ? "。现在对照最初动因：若已自然落定就停止调用工具；"
+                            ? "。现在对照最初动因：若已自然落定就停止调用工具，只回复‘本轮结束’，不能返回空消息；"
                               + "只有仍有具体未决因果才继续相关动作。无需生成正文。"
                             : "。继续补足与同一动因相关的行动。")));
                 }
@@ -2247,7 +2247,7 @@ namespace JianghuYouling.DevTest
                     {
                         messages.Add(LlmMessage.System(
                             "达到最低线后连续两轮没有新增成功行动回执；停止探索，"
-                            + "下一轮停止调用工具；无需生成正文。"));
+                            + "下一轮停止调用工具，只回复‘本轮结束’，不能返回空消息；无需生成正文。"));
                     }
                 }
             }
@@ -2324,14 +2324,15 @@ namespace JianghuYouling.DevTest
                     "你是同道月度 Agent。权威回执已确认本月围绕闭关自省完成三项、两类实质行为，"
                     + "最初动因已自然落定，没有任何需要告知、请求、解释、谈判或表态的人。"
                     + "send_message 仍在完整工具表中，但它只是有交流需要时的自然选择，不是完成门槛。"
-                    + "现在若没有具体未决因果，直接停止调用工具；无需生成正文，也不要为了丰富度追加行动。"),
+                    + "现在若没有具体未决因果，直接停止调用工具，只回复‘本轮结束’，不能返回空消息；无需生成正文，也不要为了丰富度追加行动。"),
                 LlmMessage.User("检查是否还需继续。"),
             };
             LlmToolResult optionalSpeechStop = await client.SendToolRoundAsync(
                 optionalSpeechMessages, tools, "auto", 512, 0.1, default, 90,
                 "DeepSeek同道过月无强制交流真实模拟", false, LlmReasoningPolicy.Auto);
             bool optionalSpeechGateRemoved = optionalSpeechStop != null
-                && optionalSpeechStop.Ok && !optionalSpeechStop.HasToolCalls;
+                && optionalSpeechStop.Ok && !optionalSpeechStop.HasToolCalls
+                && string.Equals(optionalSpeechStop.Content?.Trim(), "本轮结束", StringComparison.Ordinal);
 
             bool ok = tools.Count == 29 && actionCount >= 3 && categories.Count >= 2
                 && stopSignalAccepted && modelRounds <= maxModelRounds

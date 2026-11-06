@@ -77,8 +77,8 @@ namespace JianghuYouling
             internal int Generation;
             internal uint WorldId;
             internal int TaiwuId;
-            internal short AreaId;
-            internal short BlockId;
+            internal short AreaId = -1;
+            internal short BlockId = -1;
             internal string AreaName;
             internal bool ActorScene; // 手动加入的普通 NPC 以自己所在地为现场，而非强制跟随太吾
             internal List<int> MemberIds = new List<int>(); // 当前可被选为主动行动者的人物
@@ -96,7 +96,7 @@ namespace JianghuYouling
             internal string RelationshipNetwork;
             internal string RelationshipMotiveFacts;
 
-            internal CompanionSceneContext Clone()
+            internal CompanionSceneContext CloneForActor(int actorId)
             {
                 return new CompanionSceneContext
                 {
@@ -106,7 +106,8 @@ namespace JianghuYouling
                     AreaId = AreaId,
                     BlockId = BlockId,
                     AreaName = AreaName,
-                    ActorScene = ActorScene,
+                    // Choose the owner before the first validity check or snapshot request.
+                    ActorScene = !CompanionIds.Contains(actorId),
                     MemberIds = new List<int>(MemberIds ?? new List<int>()),
                     CompanionIds = new HashSet<int>(CompanionIds ?? new HashSet<int>()),
                     PresentIds = new HashSet<int>(PresentIds ?? new HashSet<int>()),
@@ -135,13 +136,13 @@ namespace JianghuYouling
             {
                 if (!WorldLifecycle.IsSameWorld(Generation) || WorldLifecycle.WorldId != WorldId) return false;
                 if (ActorScene) return true; // 提交前仍由后端按行动者实时 Location 做 race 复核。
-                short area, block;
-                return NpcSnapshotReader.TryGetCurrentWorldArea(out area, out block) && area == AreaId && block == BlockId;
+                return InterruptionCode() == null;
             }
 
             internal string InterruptionCode()
             {
                 if (ActorScene) return null;
+                if (AreaId < 0 || BlockId < 0) return "location_unavailable";
                 short area, block;
                 if (!NpcSnapshotReader.TryGetCurrentWorldArea(out area, out block)) return "location_unavailable";
                 return area != AreaId || block != BlockId ? "location_changed" : null;
@@ -524,9 +525,9 @@ namespace JianghuYouling
                 yield return BuildCompanionSceneContext(taiwuId, generation, team, pool, x => scene = x,
                     () => BatchIsCurrent(runEpoch, generation));
                 if (!BatchIsCurrent(runEpoch, generation)) yield break;
-                if (scene == null || !scene.IsCurrent())
+                if (scene == null)
                 {
-                    Debug.LogWarning("[江湖有灵] 同道主动行事无法建立权威同地场景，本批安全跳过");
+                    Debug.LogWarning("[江湖有灵] 主动行事无法建立当前世界场景，本批安全跳过");
                     foreach (CompanionMonthlyResult pending in selectedResults.Values)
                         results.Add(MonthlyInterruption.Stop(pending,
                             MonthlyInterruption.Describe(scene?.InterruptionCode() ?? "location_unavailable")));
@@ -765,17 +766,11 @@ namespace JianghuYouling
             Action<CompanionSceneContext> onDone, Func<bool> stillCurrent)
         {
             if (!PredicateIsCurrent(stillCurrent) || !WorldLifecycle.IsSameWorld(generation)) { onDone?.Invoke(null); yield break; }
-            short area, block, template; string areaName;
-            if (!NpcSnapshotReader.TryGetCurrentWorldArea(out area, out block, out template, out areaName))
-            { onDone?.Invoke(null); yield break; }
             var scene = new CompanionSceneContext
             {
                 Generation = generation,
                 WorldId = WorldLifecycle.WorldId,
                 TaiwuId = taiwuId,
-                AreaId = area,
-                BlockId = block,
-                AreaName = areaName,
             };
             var unique = new HashSet<int>();
             scene.PresentIds.Add(taiwuId);
@@ -791,11 +786,20 @@ namespace JianghuYouling
                         scene.PresentIds.Add(id); // 本体同行语义：同道视为与太吾同行。
                     }
 
+            // A missing/stale Taiwu scene only blocks his companions. Manual candidates
+            // still need this roster so they can prepare their own authoritative scene.
+            short area, block, template; string areaName;
+            if (!NpcSnapshotReader.TryGetCurrentWorldArea(out area, out block, out template, out areaName))
+            { onDone?.Invoke(scene); yield break; }
             List<int> sameBlock = null; bool blockDone = false;
             EffectHandler.QuerySameBlockChars(taiwuId, ids => { sameBlock = ids; blockDone = true; }, true);
             float blockDeadline = Time.unscaledTime + EffectHandler.ReadOnlyQueryWaitSeconds;
             while (!blockDone && Time.unscaledTime < blockDeadline && PredicateIsCurrent(stillCurrent)) yield return null;
-            if (!blockDone) { onDone?.Invoke(null); yield break; }
+            if (!PredicateIsCurrent(stillCurrent)) { onDone?.Invoke(null); yield break; }
+            if (!blockDone) { onDone?.Invoke(scene); yield break; }
+            scene.AreaId = area;
+            scene.BlockId = block;
+            scene.AreaName = areaName;
             if (sameBlock != null)
                 foreach (int id in sameBlock)
                     if (id > 0 && id != taiwuId) scene.PresentIds.Add(id);
@@ -819,7 +823,7 @@ namespace JianghuYouling
                 scene.Genders[nameIds[i]] = string.IsNullOrWhiteSpace(gender) ? "未知" : gender;
             }
 
-            if (!PredicateIsCurrent(stillCurrent) || !scene.IsCurrent()) { onDone?.Invoke(null); yield break; }
+            if (!PredicateIsCurrent(stillCurrent)) { onDone?.Invoke(null); yield break; }
             onDone?.Invoke(scene);
         }
 
@@ -912,7 +916,6 @@ namespace JianghuYouling
             if (!done || !ok || area < 0 || block < 0 || !PredicateIsCurrent(stillCurrent))
             { onDone?.Invoke(false); yield break; }
 
-            scene.ActorScene = true;
             scene.AreaId = area;
             scene.BlockId = block;
             scene.AreaName = null;
@@ -975,6 +978,8 @@ namespace JianghuYouling
             Action<CompanionMonthlyResult> onDone, Action heartbeat)
         {
             heartbeat?.Invoke();
+            // Queued non-companions must not inherit the shared Taiwu location guard.
+            scene = scene?.CloneForActor(npcId);
             long conversationClearEpoch = TalkOrchestrator.CaptureConversationClearEpoch(taiwuId, npcId);
             Action<CompanionMonthlyResult> report = onDone;
             onDone = value =>
@@ -1000,7 +1005,6 @@ namespace JianghuYouling
             if (batchCancellation.IsCancellationRequested || !BatchIsCurrent(batchEpoch, generation)
                 || scene == null || !scene.MemberIds.Contains(npcId) || !scene.IsCurrent())
             { onDone(null); yield break; }
-            scene = scene.Clone();
             string batchId = OperationId.FromStableKey("companion-batch|" + WorldLifecycle.WorldId + "|"
                 + taiwuId + "|" + npcId + "|" + date);
             Func<bool> current = () => !batchCancellation.IsCancellationRequested
@@ -1025,7 +1029,7 @@ namespace JianghuYouling
                 yield break;
             }
             bool actorSceneReady = true;
-            if (!scene.CompanionIds.Contains(npcId))
+            if (scene.ActorScene)
             {
                 actorSceneReady = false;
                 yield return PrepareActorLocalScene(scene, npcId, current, ok => actorSceneReady = ok);
