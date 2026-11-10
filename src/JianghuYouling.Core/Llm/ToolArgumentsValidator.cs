@@ -9,8 +9,8 @@ using Newtonsoft.Json.Linq;
 namespace JianghuYouling.Core.Llm
 {
     /// <summary>
-    /// 工具是游戏副作用边界。模型输出必须在执行前按本轮 ToolDef 做严格本地校验，
-    /// 不能依赖 provider 的 strict 模式，也不能把未知字段静默交给执行器。
+    /// 工具是游戏副作用边界。执行前按本轮 ToolDef 去除未声明字段，再校验必填项、类型与取值。
+    /// 多传字段不拒绝整次调用，也不把这些字段交给执行器；不依赖 provider 的 strict 模式。
     /// </summary>
     public static class ToolArgumentsValidator
     {
@@ -94,8 +94,10 @@ namespace JianghuYouling.Core.Llm
             return true;
         }
 
-        public static bool ValidateCall(IList<ToolDef> tools, string name, string argumentsJson, out string error)
+        public static bool ValidateCall(IList<ToolDef> tools, string name, string argumentsJson,
+            out string argumentsForExecution, out string error)
         {
+            argumentsForExecution = null;
             error = null;
             name = NormalizeKnownReadOnlyAlias(name, tools, argumentsJson);
             if (string.IsNullOrWhiteSpace(name) || name.Length > LlmProtocolLimits.MaxToolNameChars)
@@ -162,7 +164,42 @@ namespace JianghuYouling.Core.Llm
                 error = "本轮工具 schema 无效:" + error;
                 return false;
             }
-            return ValidateValue(value, callSchema, "$", 0, out error);
+            bool removed = RemoveUndeclaredProperties(value, callSchema);
+            if (!ValidateValue(value, callSchema, "$", 0, out error)) return false;
+            // 没有额外字段时保留原始参数文本，不无谓重排 provider 的调用记录。
+            argumentsForExecution = removed ? value.ToString(Formatting.None) : argumentsJson;
+            return true;
+        }
+
+        private static bool RemoveUndeclaredProperties(JToken value, JObject schema)
+        {
+            bool removed = false;
+            if (value is JObject obj && schema["type"]?.ToString() == "object")
+            {
+                var properties = (JObject)schema["properties"];
+                JToken additional = schema["additionalProperties"];
+                foreach (var prop in new List<JProperty>(obj.Properties()))
+                {
+                    var childSchema = properties[prop.Name] as JObject;
+                    if (childSchema == null)
+                    {
+                        if (additional == null || (additional.Type == JTokenType.Boolean && !additional.Value<bool>()))
+                        {
+                            prop.Remove();
+                            removed = true;
+                            continue;
+                        }
+                        childSchema = additional as JObject;
+                    }
+                    if (childSchema != null) removed |= RemoveUndeclaredProperties(prop.Value, childSchema);
+                }
+            }
+            else if (value is JArray arr && schema["type"]?.ToString() == "array")
+            {
+                var itemSchema = (JObject)schema["items"];
+                foreach (var item in arr) removed |= RemoveUndeclaredProperties(item, itemSchema);
+            }
+            return removed;
         }
 
         private static bool ValidateValue(JToken value, JObject schema, string path, int depth, out string error)
@@ -228,13 +265,8 @@ namespace JianghuYouling.Core.Llm
                 foreach (var prop in obj.Properties())
                 {
                     var childSchema = properties[prop.Name] as JObject;
-                    if (childSchema == null)
-                    {
-                        if (additional == null || (additional.Type == JTokenType.Boolean && !additional.Value<bool>()))
-                        { error = path + " 含未声明字段 " + prop.Name; return false; }
-                        childSchema = additional as JObject;
-                        if (childSchema == null) continue;
-                    }
+                    if (childSchema == null) childSchema = additional as JObject;
+                    if (childSchema == null) continue;
                     if (!ValidateValue(prop.Value, childSchema, path + "." + prop.Name, depth + 1, out error)) return false;
                 }
             }

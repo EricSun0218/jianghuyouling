@@ -36,6 +36,7 @@ namespace JianghuYouling
             public int Revision;
             public int WorldGeneration;
             public long Token;
+            public int? AutoAppendEpoch;
         }
 
         private sealed class RetrySuppression
@@ -51,6 +52,8 @@ namespace JianghuYouling
             new Dictionary<string, CancellationTokenSource>(StringComparer.Ordinal);
         private static readonly HashSet<string> InflightInteractivePriority =
             new HashSet<string>(StringComparer.Ordinal);
+        private static readonly Dictionary<string, GenerationLease> InflightAutoAppend =
+            new Dictionary<string, GenerationLease>(StringComparer.Ordinal);
         private static readonly Dictionary<string, long> BackgroundScheduled = new Dictionary<string, long>(StringComparer.Ordinal);
         private static readonly Dictionary<string, RetrySuppression> UpgradeRetrySuppression =
             new Dictionary<string, RetrySuppression>(StringComparer.Ordinal);
@@ -58,6 +61,32 @@ namespace JianghuYouling
         private static long _nextToken;
         private static int _interactiveBurstCount;
         private static int _interactiveBurstEpoch;
+        private static int _autoAppendEpoch;
+
+        static PortraitService()
+        {
+            PersonaAutoAppendStore.Disabled += CancelAutomaticAppend;
+        }
+
+        private static void CancelAutomaticAppend()
+        {
+            var cancellations = new List<CancellationTokenSource>();
+            lock (LeaseGate)
+            {
+                // 即使立刻重新开启，关闭之前排队或等待的请求也不能复活。
+                _autoAppendEpoch = unchecked(_autoAppendEpoch + 1);
+                foreach (var lease in InflightAutoAppend.Values)
+                    cancellations.Add(lease.Cancellation);
+            }
+            foreach (var cancellation in cancellations)
+                try { cancellation.Cancel(); }
+                catch (ObjectDisposedException) { }
+                catch (Exception ex)
+                { Debug.LogWarning("[JHYL_PERSONA_APPEND_CANCEL_FAILED] " + ex.GetType().Name); }
+        }
+
+        private static bool UsesCustomAppend(NpcSnapshot snap)
+            => PortraitDistiller.UsesCustomPersonaAppendMode(BuildEvidenceProfile(snap));
 
         private sealed class InteractiveBurstLease : IDisposable
         {
@@ -125,6 +154,7 @@ namespace JianghuYouling
                 Inflight.Remove(key);
                 if (InflightCancellation.TryGetValue(key, out cancellation)) InflightCancellation.Remove(key);
                 InflightInteractivePriority.Remove(key);
+                InflightAutoAppend.Remove(key);
                 BackgroundScheduled.Remove(key);
                 RemoveUpgradeSuppressionsLocked(key);
             }
@@ -147,6 +177,7 @@ namespace JianghuYouling
                 if (!InflightInteractivePriority.Contains(key)) return;
                 Inflight.Remove(key);
                 InflightInteractivePriority.Remove(key);
+                InflightAutoAppend.Remove(key);
                 if (InflightCancellation.TryGetValue(key, out cancellation))
                     InflightCancellation.Remove(key);
             }
@@ -164,6 +195,7 @@ namespace JianghuYouling
                 Inflight.Clear();
                 InflightCancellation.Clear();
                 InflightInteractivePriority.Clear();
+                InflightAutoAppend.Clear();
                 BackgroundScheduled.Clear();
                 UpgradeRetrySuppression.Clear();
                 Revisions.Clear();
@@ -239,7 +271,7 @@ namespace JianghuYouling
         }
 
         private static GenerationLease TryBeginLease(string key, int revision, int worldGeneration,
-            bool interactivePriority = false)
+            bool interactivePriority = false, bool automaticCustomAppend = false)
         {
             if (!WorldLifecycle.IsSameWorld(worldGeneration)) return null;
             lock (LeaseGate)
@@ -251,7 +283,7 @@ namespace JianghuYouling
                 Inflight[key] = token;
                 InflightCancellation[key] = cancellation;
                 if (interactivePriority) InflightInteractivePriority.Add(key);
-                return new GenerationLease
+                var lease = new GenerationLease
                 {
                     Key = key,
                     Revision = revision,
@@ -261,6 +293,8 @@ namespace JianghuYouling
                     Cancellation = cancellation,
                     InteractivePriority = interactivePriority,
                 };
+                if (automaticCustomAppend) InflightAutoAppend[key] = lease;
+                return lease;
             }
         }
 
@@ -295,6 +329,8 @@ namespace JianghuYouling
                     owned = true;
                 }
                 if (owned) InflightInteractivePriority.Remove(lease.Key);
+                if (InflightAutoAppend.TryGetValue(lease.Key, out var automatic)
+                    && ReferenceEquals(automatic, lease)) InflightAutoAppend.Remove(lease.Key);
             }
             try { lease.Cancellation?.Dispose(); } catch { }
         }
@@ -312,12 +348,14 @@ namespace JianghuYouling
             int worldGeneration = WorldLifecycle.Generation;
             if (!WorldLifecycle.IsSameWorld(worldGeneration)) return immediate;
             if (InteractiveBurstActive()) return immediate;
+            bool customAppend = UsesCustomAppend(snap);
+            if (customAppend && !PersonaAutoAppendStore.Load()) return immediate;
 
             string sourceFingerprint = SourceFingerprint(snap);
             string retryFingerprint = "seed|" + sourceFingerprint;
             if ((existing == null || PortraitStore.NeedsUpgrade(snap, sourceFingerprint))
                 && !UpgradeSuppressed(NpcKey(snap), retryFingerprint))
-                ScheduleBackgroundUpgrade(snap, worldGeneration);
+                ScheduleBackgroundUpgrade(snap, worldGeneration, customAppend);
             return immediate;
         }
 
@@ -347,7 +385,18 @@ namespace JianghuYouling
                 onReady?.Invoke(existing);
                 yield break;
             }
-            yield return GenerateSeeded(snap, onReady, interactivePriority: true);
+            int appendEpoch = _autoAppendEpoch;
+            int worldGeneration = WorldLifecycle.Generation;
+            string key = NpcKey(snap);
+            int revision = RevisionOf(key);
+            string ready = null;
+            yield return GenerateSeeded(snap, value => ready = value, interactivePriority: true,
+                expectedAutoAppendEpoch: appendEpoch);
+            // 关闭自动补充不应让正在入座的自定义人设角色退出群聊。
+            if (ready == null && appendEpoch != _autoAppendEpoch
+                && RequestStillValid(key, revision, worldGeneration))
+                ready = PortraitStore.GetPortrait(snap) ?? PortraitStore.BuildSimple(snap);
+            if (ready != null) onReady?.Invoke(ready);
         }
 
         /// <summary>
@@ -362,7 +411,7 @@ namespace JianghuYouling
                 forceRegeneration: true);
         }
 
-        private static void ScheduleBackgroundUpgrade(NpcSnapshot snap, int worldGeneration)
+        private static void ScheduleBackgroundUpgrade(NpcSnapshot snap, int worldGeneration, bool customAppend)
         {
             var host = TalkEntryHost.Instance;
             if (host == null || snap == null) return;
@@ -380,6 +429,7 @@ namespace JianghuYouling
                     Revision = revision,
                     WorldGeneration = worldGeneration,
                     Token = token,
+                    AutoAppendEpoch = customAppend ? (int?)_autoAppendEpoch : null,
                 };
             }
 
@@ -395,6 +445,7 @@ namespace JianghuYouling
         private static bool BackgroundRequestValid(BackgroundUpgradeRequest request)
         {
             if (request == null || !RequestStillValid(request.Key, request.Revision, request.WorldGeneration)) return false;
+            if (request.AutoAppendEpoch.HasValue && request.AutoAppendEpoch.Value != _autoAppendEpoch) return false;
             lock (LeaseGate)
                 return BackgroundScheduled.TryGetValue(request.Key, out long token) && token == request.Token;
         }
@@ -404,7 +455,7 @@ namespace JianghuYouling
             try
             {
                 if (!BackgroundRequestValid(request) || InteractiveBurstActive()) yield break;
-                yield return GenerateSeeded(snap, _ => { });
+                yield return GenerateSeeded(snap, _ => { }, expectedAutoAppendEpoch: request.AutoAppendEpoch);
             }
             finally
             {
@@ -416,7 +467,7 @@ namespace JianghuYouling
 
         /// <summary>实际蒸馏实现；后台调度与群聊显式等待均复用同一套 single-flight/代次门禁。</summary>
         private static IEnumerator GenerateSeeded(NpcSnapshot snap, Action<string> onReady,
-            bool interactivePriority = false, bool forceRegeneration = false)
+            bool interactivePriority = false, bool forceRegeneration = false, int? expectedAutoAppendEpoch = null)
         {
             if (snap == null) { onReady?.Invoke(""); yield break; }
 
@@ -425,6 +476,13 @@ namespace JianghuYouling
             string key = NpcKey(snap);
             int revision = RevisionOf(key);
             string existing = PortraitStore.GetPortrait(snap);
+            bool automaticCustomAppend = !forceRegeneration && UsesCustomAppend(snap);
+            int appendEpoch = expectedAutoAppendEpoch ?? _autoAppendEpoch;
+            if (automaticCustomAppend && (appendEpoch != _autoAppendEpoch || !PersonaAutoAppendStore.Load()))
+            {
+                onReady?.Invoke(existing ?? PortraitStore.BuildSimple(snap));
+                yield break;
+            }
             string sourceFingerprint = SourceFingerprint(snap);
             string retryFingerprint = "seed|" + sourceFingerprint;
             if (!forceRegeneration && UpgradeSuppressed(key, retryFingerprint))
@@ -446,8 +504,14 @@ namespace JianghuYouling
             if (HasInflight(key))
             {
                 yield return new WaitUntil(() => !HasInflight(key)
-                    || !RequestStillValid(key, revision, worldGeneration));
+                    || !RequestStillValid(key, revision, worldGeneration)
+                    || automaticCustomAppend && appendEpoch != _autoAppendEpoch);
                 if (!RequestStillValid(key, revision, worldGeneration)) yield break;
+                if (automaticCustomAppend && appendEpoch != _autoAppendEpoch)
+                {
+                    onReady?.Invoke(PortraitStore.GetPortrait(snap) ?? PortraitStore.BuildSimple(snap));
+                    yield break;
+                }
                 string completed = PortraitStore.GetPortrait(snap);
                 if (!forceRegeneration && completed != null
                     && !PortraitStore.NeedsUpgrade(snap, SourceFingerprint(snap)))
@@ -457,11 +521,11 @@ namespace JianghuYouling
                     // interactive group opened. Acquire a fresh priority lease instead of
                     // claiming that a deterministic placeholder is a completed portrait.
                     yield return GenerateSeeded(snap, onReady, interactivePriority,
-                        forceRegeneration);
+                        forceRegeneration, appendEpoch);
                 yield break;
             }
 
-            var lease = TryBeginLease(key, revision, worldGeneration, interactivePriority);
+            var lease = TryBeginLease(key, revision, worldGeneration, interactivePriority, automaticCustomAppend);
             if (lease == null) yield break;
             try
             {
@@ -563,11 +627,13 @@ namespace JianghuYouling
         public static IEnumerator Consolidate(NpcSnapshot snap)
         {
             if (snap == null) yield break;
+            bool customAppend = UsesCustomAppend(snap);
+            if (customAppend && !PersonaAutoAppendStore.Load()) yield break;
             int worldGeneration = WorldLifecycle.Generation;
             if (!WorldLifecycle.IsSameWorld(worldGeneration)) yield break;
 
             string prior = PortraitStore.GetPortrait(snap);
-            if (prior == null) { yield return EnsureSeeded(snap, _ => { }); yield break; }   // 还没初遇画像,先建
+            if (prior == null) { GetImmediateAndScheduleUpgrade(snap); yield break; }   // 还没初遇画像,先建
 
             var memoryInput = BuildMemoryInput(snap);
             if (!memoryInput.Reliable)
@@ -594,7 +660,7 @@ namespace JianghuYouling
             var client = LlmService.GetBackgroundClient();   // 画像蒸馏走后台模型(留空=同主模型)
             if (client == null) yield break;
 
-            var lease = TryBeginLease(key, revision, worldGeneration);
+            var lease = TryBeginLease(key, revision, worldGeneration, automaticCustomAppend: customAppend);
             if (lease == null) yield break;
             try
             {
@@ -625,7 +691,6 @@ namespace JianghuYouling
                     value => result = value);
                 if (!LeaseValid(lease)) yield break;
                 bool modelReturnedContent = !string.IsNullOrWhiteSpace(result);
-                bool customAppend = PortraitDistiller.UsesCustomPersonaAppendMode(evidenceProfile);
                 string groundingFailure = null;
                 bool grounded;
                 if (customAppend)

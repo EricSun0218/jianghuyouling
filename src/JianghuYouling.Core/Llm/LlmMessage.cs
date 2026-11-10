@@ -8,7 +8,7 @@ namespace JianghuYouling.Core.Llm
     {
         public string Id { get; set; }            // tool_call_id,回传 tool 结果时要对上
         public string Name { get; set; }          // function.name
-        public string ArgumentsJson { get; set; } // function.arguments(原始 JSON 字符串)
+        public string ArgumentsJson { get; set; } // function.arguments：已过滤 schema 外字段的执行参数
         /// <summary>
         /// provider 附在 tool_call 上、后续轮必须原样回灌的扩展字段。
         /// 典型为 Gemini 3 extra_content.google.thought_signature。

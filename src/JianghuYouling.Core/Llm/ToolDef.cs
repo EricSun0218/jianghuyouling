@@ -36,7 +36,7 @@ namespace JianghuYouling.Core.Llm
                 props[key] = prop;
                 if (required) req.Add(key);
             }
-            // Mod 工具会产生真实游戏副作用；默认禁止模型夹带 schema 外字段。
+            // 向模型声明精确工具参数；响应多传字段时由本地校验器过滤后再交给执行器。
             var schema = new JObject
             {
                 ["type"] = "object",

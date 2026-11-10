@@ -111,7 +111,7 @@
   只发送低 `effort`；已知 4.5 使用有上下限的手动
   `enabled + budget_tokens`；未知型号不猜协议。兼容层不会返回详细思考，
   故不能把缺少 thought 字段解释成模型未推理。
-- `strict` 工具 schema 会被服务端忽略；客户端仍在执行前本地校验 required/type/enum/range/additionalProperties。
+- `strict` 工具 schema 会被服务端忽略；客户端仍在执行前本地校验 required/type/enum/range。未声明且未由 additionalProperties 允许的额外字段先过滤，不因此拒绝合法调用。
 
 官方依据：
 
@@ -169,4 +169,4 @@
 - API key 含 CR/LF 时拒绝请求；外部错误、日志、UI 错误统一经 `SecretRedactor`。
 - 请求体、HTTP 响应头、响应体、SSE 单行/事件、可见正文、思考、工具数量与参数均有硬上限。
 - 普通正文与工具轮都必须有唯一 choice 和完整 `finish_reason`；`length`、过滤、中断、缺失完成原因一律失败。
-- 工具参数执行前按本轮 `ToolDef` 校验 required、type、enum、数值范围与 additionalProperties。
+- 工具参数执行前按本轮 `ToolDef` 过滤未声明且未由 additionalProperties 允许的额外字段，再校验 required、type、enum 和数值范围；嵌套对象与对象数组同样处理。

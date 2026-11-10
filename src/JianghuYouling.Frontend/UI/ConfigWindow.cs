@@ -32,6 +32,7 @@ namespace JianghuYouling
         static Button _saveBtn, _testBtn, _profileActivateBtn, _profileSaveBtn, _profileDeleteBtn, _diffBtn, _streamBtn, _replyLenBtn, _fontSizeBtn, _ghostwriteLenBtn, _ghostwriteLearningBtn, _thinkBtn, _aiEventBtn, _companionMonthlyBtn, _monthlyPopupBtn, _monthlyCandidateManagerBtn, _wbStructuredBtn = null, _wbResetBtn = null, _personaResetBtn, _asstEnabledBtn, _asstFreqBtn, _asstCommissionIntervalBtn, _asstFaceResetBtn, _groupRoundsBtn, _npcProactiveEnabledBtn, _npcProactiveFreqBtn, _imageWatermarkBtn;
         static TMP_Dropdown _profileDropdown;
         static Button _thinkingPromptBtn;
+        static Button _personaAutoAppendBtn;
         static Button _ttsDialogueOnlyBtn;
         static Button _economyPresetBtn, _balancedPresetBtn, _bestExperiencePresetBtn;
         static GameObject[] _panes;
@@ -286,6 +287,7 @@ namespace JianghuYouling
             SetFontSizeLabel();
             SetGhostwriteLenLabel();
             SetGhostwriteLearningLabel();
+            SetPersonaAutoAppendLabel();
             SetDiffLabel();
 
             ReloadConversationTextRuntimeFromDisk();
@@ -650,6 +652,26 @@ namespace JianghuYouling
             SetStatus(next
                 ? "代笔自学习已开启：会从当前存档的真实玩家发言中逐渐模仿用词、内容倾向和字数。"
                 : "代笔自学习已关闭：继续使用默认代笔文风、手动太吾口吻与代笔篇幅。", false);
+        }
+        static void SetPersonaAutoAppendLabel()
+        {
+            if (_personaAutoAppendBtn == null) return;
+            var text = _personaAutoAppendBtn.GetComponentInChildren<TextMeshProUGUI>();
+            if (text != null) text.text = PersonaAutoAppendStore.Load() ? "开" : "关";
+        }
+        static void TogglePersonaAutoAppend()
+        {
+            bool next = !PersonaAutoAppendStore.Load();
+            bool saved = PersonaAutoAppendStore.Save(next);
+            SetPersonaAutoAppendLabel();
+            if (!saved)
+            {
+                SetStatus("AI 自动补充人设开关保存失败，已重新读取磁盘实际值。", true);
+                return;
+            }
+            SetStatus(next
+                ? "AI 自动补充人设已开启（全局）：允许为自定义人设追加长期新增内容。"
+                : "AI 自动补充人设已关闭（全局）：已有补充继续生效，手动「AI 更新」仍可使用；未自定义角色的自动画像不受影响。", false);
         }
         static void SetStreamLabel() { if (_streamBtn != null) { var t = _streamBtn.GetComponentInChildren<TextMeshProUGUI>(); if (t != null) t.text = _stream ? "开" : "关"; } }
         static void SetGroupRoundsLabel() { if (_groupRoundsBtn != null) { var t = _groupRoundsBtn.GetComponentInChildren<TextMeshProUGUI>(); if (t != null) t.text = _groupRounds + " 轮"; } }
@@ -2497,15 +2519,31 @@ namespace JianghuYouling
         static GameObject BuildPersonaPane(Transform parent)
         {
             var pane = NewPane("Pane_Persona", parent);
+            var autoLabel = NewText("Lbl_PersonaAutoAppend", pane.transform, 16, TextAlignmentOptions.Left);
+            Anchor(autoLabel.rectTransform, new Vector2(0, 1), new Vector2(1, 1), new Vector2(4, -32), new Vector2(-150, -4));
+            autoLabel.text = "AI 自动补充人设（全局，默认开启）";
+            autoLabel.color = new Color(0.80f, 0.78f, 0.70f, 1f);
+            var autoGo = NewButton("TogglePersonaAutoAppend", pane.transform, "开", 14, out _personaAutoAppendBtn);
+            var autoRt = autoGo.GetComponent<RectTransform>();
+            autoRt.anchorMin = autoRt.anchorMax = autoRt.pivot = new Vector2(1, 1);
+            autoRt.anchoredPosition = new Vector2(-4, -2);
+            autoRt.sizeDelta = new Vector2(120, 30);
+            _personaAutoAppendBtn.onClick.AddListener(TogglePersonaAutoAppend);
+            var autoHint = NewText("Hint_PersonaAutoAppend", pane.transform, 14, TextAlignmentOptions.Left);
+            Anchor(autoHint.rectTransform, new Vector2(0, 1), new Vector2(1, 1), new Vector2(4, -84), new Vector2(-4, -36));
+            autoHint.text = "仅控制自定义人设的自动追加，点击即保存。关闭后已有补充继续生效，手动「AI 更新」仍可用；未自定义角色的自动画像不受影响。";
+            autoHint.enableWordWrapping = true;
+            autoHint.color = new Color(0.62f, 0.62f, 0.58f, 1f);
             _personaTitle = NewText("Lbl_Persona", pane.transform, 16, TextAlignmentOptions.Left);
-            Anchor(_personaTitle.rectTransform, new Vector2(0, 1), new Vector2(1, 1), new Vector2(4, -26), new Vector2(-202, -4));
+            Anchor(_personaTitle.rectTransform, new Vector2(0, 1), new Vector2(1, 1), new Vector2(4, -116), new Vector2(-202, -94));
             _personaTitle.text = "自定义人设"; _personaTitle.color = new Color(0.80f, 0.78f, 0.70f, 1f);
             var pmResetGo = NewButton("ResetPersona", pane.transform, "还原默认", 14, out _personaResetBtn);
             PlaceResetButton(pmResetGo, -4f);
+            pmResetGo.GetComponent<RectTransform>().anchoredPosition = new Vector2(-4, -92);
             _personaResetBtn.onClick.AddListener(ResetPersona);
-            _personaInputGo = BuildMultilineGo(pane.transform, -32, MaxPersona, out _personaInput);
+            _personaInputGo = BuildMultilineGo(pane.transform, -122, MaxPersona, out _personaInput);
             _personaHint = NewText("Persona_Hint", pane.transform, 16, TextAlignmentOptions.Center);
-            Anchor(_personaHint.rectTransform, Vector2.zero, Vector2.one, new Vector2(8, 8), new Vector2(-8, -32));
+            Anchor(_personaHint.rectTransform, Vector2.zero, Vector2.one, new Vector2(8, 8), new Vector2(-8, -122));
             _personaHint.enableWordWrapping = true; _personaHint.color = new Color(0.62f, 0.62f, 0.58f, 1f);
             _personaHint.text = "（人设按 NPC 设定。请从与某位 NPC 的对话窗口点「设置」打开本页,方可为 TA 编辑人设。）";
             return pane;

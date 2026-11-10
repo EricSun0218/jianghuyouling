@@ -34,6 +34,7 @@
     <Compile Include="..\..\src\JianghuYouling.Frontend\Game\NpcChatUnreadStore.cs" Link="Production\NpcChatUnreadStore.cs" />
     <Compile Include="..\..\src\JianghuYouling.Frontend\Game\GhostwriteLengthStore.cs" Link="Production\GhostwriteLengthStore.cs" />
     <Compile Include="..\..\src\JianghuYouling.Frontend\Game\GhostwriteSelfLearningStore.cs" Link="Production\GhostwriteSelfLearningStore.cs" />
+    <Compile Include="..\..\src\JianghuYouling.Frontend\Game\PersonaAutoAppendStore.cs" Link="Production\PersonaAutoAppendStore.cs" />
     <Compile Include="..\..\src\JianghuYouling.Frontend\Game\GhostwriteLearningContext.cs" Link="Production\GhostwriteLearningContext.cs" />
     <Compile Include="..\..\src\JianghuYouling.Frontend\Game\CompanionMonthlyStore.cs" Link="Production\CompanionMonthlyStore.cs" />
     <Compile Include="..\..\src\JianghuYouling.Frontend\Game\MonthlyDigestPopupStore.cs" Link="Production\MonthlyDigestPopupStore.cs" />

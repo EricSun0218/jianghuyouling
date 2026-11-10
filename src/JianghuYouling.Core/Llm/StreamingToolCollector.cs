@@ -621,9 +621,13 @@ namespace JianghuYouling.Core.Llm
                     b.Name, AllowedTools, arguments);
                 if (!LlmJsonProtocol.TryParseObject(arguments, LlmProtocolLimits.MaxToolArgumentsBytes, out _, out var argumentError))
                     return new LlmToolResult { Ok = false, Error = "流式工具参数不完整:" + argumentError };
-                if ((EnforceAllowedTools || AllowedTools != null)
-                    && !ToolArgumentsValidator.ValidateCall(AllowedTools, canonicalName, arguments, out var validationError))
-                    return new LlmToolResult { Ok = false, Error = "流式工具参数未通过 schema:" + validationError };
+                if (EnforceAllowedTools || AllowedTools != null)
+                {
+                    if (!ToolArgumentsValidator.ValidateCall(AllowedTools, canonicalName, arguments,
+                        out var executableArguments, out var validationError))
+                        return new LlmToolResult { Ok = false, Error = "流式工具参数未通过 schema:" + validationError };
+                    arguments = executableArguments;
+                }
                 if (b.ExtraFields.Count > 0
                     && Encoding.UTF8.GetByteCount(b.ExtraFields.ToString(Newtonsoft.Json.Formatting.None)) > LlmProtocolLimits.MaxProviderMetadataBytes)
                     return new LlmToolResult { Ok = false, Error = "provider tool_call 扩展字段过大" };

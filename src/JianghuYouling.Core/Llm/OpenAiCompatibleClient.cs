@@ -2127,8 +2127,13 @@ namespace JianghuYouling.Core.Llm
                             return new LlmToolResult { Ok = false, Error = "工具参数超过字节上限" };
                         if (!LlmJsonProtocol.TryParseObject(arguments, LlmProtocolLimits.MaxToolArgumentsBytes, out _, out var argumentError))
                             return new LlmToolResult { Ok = false, Error = "工具参数不完整:" + argumentError };
-                        if (enforceAllowedTools && !ToolArgumentsValidator.ValidateCall(tools, name, arguments, out var validationError))
-                            return new LlmToolResult { Ok = false, Error = "工具参数未通过 schema:" + validationError };
+                        if (enforceAllowedTools)
+                        {
+                            if (!ToolArgumentsValidator.ValidateCall(tools, name, arguments,
+                                out var executableArguments, out var validationError))
+                                return new LlmToolResult { Ok = false, Error = "工具参数未通过 schema:" + validationError };
+                            arguments = executableArguments;
+                        }
                         var extra = new JObject();
                         var tcObj = tc as JObject;
                         if (tcObj != null)

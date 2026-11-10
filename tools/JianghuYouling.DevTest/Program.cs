@@ -72,6 +72,15 @@ namespace JianghuYouling.DevTest
                     OptionValue(args, "--image-protected-config"),
                     OptionValue(args, "--image-reference"));
             string protectedConfigPath = OptionValue(args, "--deepseek-protected-config");
+            if (args != null && Array.Exists(args, a => string.Equals(a, "--extra-tool-arguments-live", StringComparison.OrdinalIgnoreCase)))
+            {
+                if (!ProtectedConfigFile.TryLoad(protectedConfigPath, out var extraConfig, out var extraKey, out _))
+                    throw new InvalidOperationException("无法读取真实模型测试配置");
+                var extraClient = new OpenAiCompatibleClient(extraConfig["baseUrl"]?.ToString(),
+                    extraConfig["chatPath"]?.ToString(), extraKey, extraConfig["model"]?.ToString());
+                extraKey = null;
+                return await ToolArgumentProjectionTests.RunLive(extraClient);
+            }
             if (args != null && Array.Exists(args,
                 a => string.Equals(a, "--scene-image-prompt-live", StringComparison.OrdinalIgnoreCase)))
                 return await SceneImagePromptTests.RunLive(protectedConfigPath);
@@ -253,7 +262,7 @@ namespace JianghuYouling.DevTest
 
             if (args != null && Array.Exists(args, a => string.Equals(a, "--special-persona-only", StringComparison.OrdinalIgnoreCase)))
             {
-                try { TestSpecialPersonaResources(); TestGhostwriteLength(); return 0; }
+                try { TestSpecialPersonaResources(); TestGhostwriteLength(); TestPersonaAutoAppendSetting(); return 0; }
                 catch (Exception ex)
                 {
                     Console.Error.WriteLine("[SPECIAL-PERSONA FAIL] " + ex.GetType().Name + ": " + ex.Message);
@@ -391,6 +400,7 @@ namespace JianghuYouling.DevTest
             TestBehaviorDispositionPolicy();
             TestSpecialPersonaResources();
             TestGhostwriteLength();
+            TestPersonaAutoAppendSetting();
             TestNpcNovelPrompt();
             TestPromptOptimizationPrimitives();
             TestAgentRoutingBudgetAndArbitration();
@@ -875,7 +885,7 @@ namespace JianghuYouling.DevTest
                     && value["value"]?.Type == JTokenType.String
                     && ToolArgumentsValidator.ValidateCall(
                         new List<ToolDef> { integerTool }, "integer_probe",
-                        value.ToString(Newtonsoft.Json.Formatting.None), out _);
+                        value.ToString(Newtonsoft.Json.Formatting.None), out _, out _);
             }
             catch { integerStringOk = false; }
             Console.WriteLine("  integer_string_argument="
@@ -929,7 +939,7 @@ namespace JianghuYouling.DevTest
                 recoveredOk = call != null
                     && string.Equals(call.Name, "live_recovery_probe", StringComparison.Ordinal)
                     && ToolArgumentsValidator.ValidateCall(tools, call.Name,
-                        call.ArgumentsJson, out _);
+                        call.ArgumentsJson, out _, out _);
                 if (recoveredOk)
                 {
                     try
@@ -5448,21 +5458,23 @@ namespace JianghuYouling.DevTest
             var tools = new List<ToolDef> { bounded };
             AssertEq("ToolDef 默认 additionalProperties=false", bounded.Parameters["additionalProperties"]?.ToString(), "False");
             AssertEq("工具定义合法", ToolArgumentsValidator.ValidateDefinitions(tools, out _).ToString(), "True");
-            AssertEq("工具参数合法", ToolArgumentsValidator.ValidateCall(tools, "bounded", "{\"mode\":\"a\",\"count\":2}", out _).ToString(), "True");
-            AssertEq("缺 required 拒绝", ToolArgumentsValidator.ValidateCall(tools, "bounded", "{\"mode\":\"a\"}", out _).ToString(), "False");
+            AssertEq("工具参数合法", ToolArgumentsValidator.ValidateCall(tools, "bounded", "{\"mode\":\"a\",\"count\":2}", out _, out _).ToString(), "True");
+            AssertEq("缺 required 拒绝", ToolArgumentsValidator.ValidateCall(tools, "bounded", "{\"mode\":\"a\"}", out _, out _).ToString(), "False");
             AssertEq("模型把整数写成字符串时安全接收", ToolArgumentsValidator.ValidateCall(
-                tools, "bounded", "{\"mode\":\"a\",\"count\":\"2\"}", out _).ToString(), "True");
+                tools, "bounded", "{\"mode\":\"a\",\"count\":\"2\"}", out _, out _).ToString(), "True");
             AssertEq("非整数文本仍拒绝", ToolArgumentsValidator.ValidateCall(
-                tools, "bounded", "{\"mode\":\"a\",\"count\":\"2.5\"}", out _).ToString(), "False");
+                tools, "bounded", "{\"mode\":\"a\",\"count\":\"2.5\"}", out _, out _).ToString(), "False");
             AssertEq("整数字符串仍执行上下界", ToolArgumentsValidator.ValidateCall(
-                tools, "bounded", "{\"mode\":\"a\",\"count\":\"4\"}", out _).ToString(), "False");
-            AssertEq("enum 越界拒绝", ToolArgumentsValidator.ValidateCall(tools, "bounded", "{\"mode\":\"c\",\"count\":2}", out _).ToString(), "False");
-            AssertEq("minimum 拒绝", ToolArgumentsValidator.ValidateCall(tools, "bounded", "{\"mode\":\"a\",\"count\":0}", out _).ToString(), "False");
-            AssertEq("maximum 拒绝", ToolArgumentsValidator.ValidateCall(tools, "bounded", "{\"mode\":\"a\",\"count\":4}", out _).ToString(), "False");
-            AssertEq("additionalProperties 拒绝", ToolArgumentsValidator.ValidateCall(tools, "bounded", "{\"mode\":\"a\",\"count\":2,\"evil\":1}", out _).ToString(), "False");
-            AssertEq("参数 JSON 重复键拒绝", ToolArgumentsValidator.ValidateCall(tools, "bounded", "{\"mode\":\"a\",\"mode\":\"b\",\"count\":2}", out _).ToString(), "False");
-            AssertEq("参数 JSON 注释拒绝", ToolArgumentsValidator.ValidateCall(tools, "bounded", "{/*不可信*/\"mode\":\"a\",\"count\":2}", out _).ToString(), "False");
-            AssertEq("未授权工具拒绝", ToolArgumentsValidator.ValidateCall(tools, "other", "{}", out _).ToString(), "False");
+                tools, "bounded", "{\"mode\":\"a\",\"count\":\"4\"}", out _, out _).ToString(), "False");
+            AssertEq("enum 越界拒绝", ToolArgumentsValidator.ValidateCall(tools, "bounded", "{\"mode\":\"c\",\"count\":2}", out _, out _).ToString(), "False");
+            AssertEq("minimum 拒绝", ToolArgumentsValidator.ValidateCall(tools, "bounded", "{\"mode\":\"a\",\"count\":0}", out _, out _).ToString(), "False");
+            AssertEq("maximum 拒绝", ToolArgumentsValidator.ValidateCall(tools, "bounded", "{\"mode\":\"a\",\"count\":4}", out _, out _).ToString(), "False");
+            AssertEq("额外字段过滤后继续执行", ToolArgumentsValidator.ValidateCall(tools, "bounded", "{\"mode\":\"a\",\"count\":2,\"reason\":\"说明\"}", out string sanitized, out _).ToString(), "True");
+            AssertEq("执行参数不含额外字段", sanitized, "{\"mode\":\"a\",\"count\":2}");
+            AssertEq("参数 JSON 重复键拒绝", ToolArgumentsValidator.ValidateCall(tools, "bounded", "{\"mode\":\"a\",\"mode\":\"b\",\"count\":2}", out _, out _).ToString(), "False");
+            AssertEq("参数 JSON 注释拒绝", ToolArgumentsValidator.ValidateCall(tools, "bounded", "{/*不可信*/\"mode\":\"a\",\"count\":2}", out _, out _).ToString(), "False");
+            AssertEq("未授权工具拒绝", ToolArgumentsValidator.ValidateCall(tools, "other", "{}", out _, out _).ToString(), "False");
+            ToolArgumentProjectionTests.RunOffline();
             var duplicate = new List<ToolDef> { bounded, ToolDef.Of("bounded", "dup", ToolDef.Obj()) };
             AssertEq("重复工具定义拒绝", ToolArgumentsValidator.ValidateDefinitions(duplicate, out _).ToString(), "False");
             var badRange = ToolDef.Of("bad_range", "bad", ToolDef.Obj(
@@ -5517,8 +5529,10 @@ namespace JianghuYouling.DevTest
                 + ",\"arguments\":" + JToken.FromObject(args).ToString(Newtonsoft.Json.Formatting.None) + "}}]}}]}";
             AssertEq("非流 schema 合法", ((LlmToolResult)parse.Invoke(null, new object[]
             { ToolResponse("tool_calls", "{\"mode\":\"a\",\"count\":2}"), 200, false, tools, namedBounded })).Ok.ToString(), "True");
-            AssertEq("非流 schema 额外字段拒绝", ((LlmToolResult)parse.Invoke(null, new object[]
-            { ToolResponse("tool_calls", "{\"mode\":\"a\",\"count\":2,\"evil\":1}"), 200, false, tools, namedBounded })).Ok.ToString(), "False");
+            var extraFieldResult = (LlmToolResult)parse.Invoke(null, new object[]
+            { ToolResponse("tool_calls", "{\"mode\":\"a\",\"count\":2,\"reason\":\"说明\"}"), 200, false, tools, namedBounded });
+            AssertEq("非流额外字段过滤后成功", (extraFieldResult.Ok
+                && extraFieldResult.ToolCalls[0].ArgumentsJson == "{\"mode\":\"a\",\"count\":2}").ToString(), "True");
             AssertEq("非流无授权工具时拒绝 provider 凭空调用", ((LlmToolResult)parse.Invoke(null, new object[]
             { ToolResponse("tool_calls", "{\"mode\":\"a\",\"count\":2}"), 200, false, null, "auto" })).Ok.ToString(), "False");
             const string objectArguments = "{\"choices\":[{\"finish_reason\":\"tool_calls\",\"message\":{\"content\":\"\","
@@ -8377,6 +8391,39 @@ namespace JianghuYouling.DevTest
                 (tokenBound.Reserve(nearBilledCeiling, 0) == null).ToString(), "True");
             AssertEq("群聊保险丝拒绝预估计费越界",
                 (tokenBound.Reserve(2, 0) != null).ToString(), "True");
+        }
+
+        private static void TestPersonaAutoAppendSetting()
+        {
+            Console.WriteLine("=== 自定义人设自动补充开关自测 ===");
+            string previousRoot = JianghuYoulingPaths.Root;
+            string root = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "jyl_persona_toggle_" + Guid.NewGuid().ToString("N"));
+            int disabled = 0;
+            Action onDisabled = () => disabled++;
+            global::JianghuYouling.PersonaAutoAppendStore.Disabled += onDisabled;
+            try
+            {
+                JianghuYoulingPaths.Root = root;
+                AssertEq("自动补充默认开启", global::JianghuYouling.PersonaAutoAppendStore.Load().ToString(), "True");
+                AssertEq("关闭开关耐久保存", global::JianghuYouling.PersonaAutoAppendStore.Save(false).ToString(), "True");
+                AssertEq("关闭通知取消在途请求", disabled.ToString(), "1");
+                AssertEq("关闭后重新读取保持关闭", global::JianghuYouling.PersonaAutoAppendStore.Load().ToString(), "False");
+                string path = global::JianghuYouling.PersonaAutoAppendStore.SettingsPath;
+                AssertEq("开关存放全局设置目录", path.StartsWith(JianghuYoulingPaths.Settings, StringComparison.Ordinal).ToString(), "True");
+                AssertEq("开关具有内容一致的耐久副本", (System.IO.File.Exists(path + ".bak")
+                    && System.IO.File.ReadAllText(path) == System.IO.File.ReadAllText(path + ".bak")).ToString(), "True");
+                System.IO.File.WriteAllText(path, "invalid");
+                AssertEq("损坏主文件从副本恢复关闭状态", global::JianghuYouling.PersonaAutoAppendStore.Load().ToString(), "False");
+                AssertEq("重新开启耐久保存", global::JianghuYouling.PersonaAutoAppendStore.Save(true).ToString(), "True");
+                AssertEq("重新读取开启状态", global::JianghuYouling.PersonaAutoAppendStore.Load().ToString(), "True");
+                AssertEq("开启不发送关闭通知", disabled.ToString(), "1");
+            }
+            finally
+            {
+                global::JianghuYouling.PersonaAutoAppendStore.Disabled -= onDisabled;
+                JianghuYoulingPaths.Root = previousRoot;
+                try { if (System.IO.Directory.Exists(root)) System.IO.Directory.Delete(root, true); } catch { }
+            }
         }
 
         private static void TestGhostwriteLength()
